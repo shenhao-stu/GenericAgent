@@ -64,12 +64,12 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             yield response.content
 
         if not response.tool_calls: tool_calls = [{'tool_name': 'no_tool', 'args': {}}]
-        else: tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments)}
+        else: tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments), 'id': tc.id}
                           for tc in response.tool_calls]
        
-        next_prompt = ""; should_exit = None
+        tool_results = []; next_prompts = set(); should_exit = None
         for ii, tc in enumerate(tool_calls):
-            tool_name, args = tc['tool_name'], tc['args']
+            tool_name, args, tid = tc['tool_name'], tc['args'], tc.get('id', '')
             if tool_name == 'no_tool': pass
             else: 
                 showarg = get_pretty_json(args)
@@ -82,18 +82,18 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 outcome = yield from gen
                 yield '`````\n'
             else: outcome = exhaust(gen)
-            
+
             if outcome.should_exit: return {'result': 'EXITED', 'data': outcome.data}    # should_exit is only used for immediate exit
             if not outcome.next_prompt: 
                 should_exit = {'result': 'CURRENT_TASK_DONE', 'data': outcome.data}; break
             if outcome.next_prompt.startswith('未知工具'): client.last_tools = ''
             if outcome.data is not None: 
                 datastr = json.dumps(outcome.data, ensure_ascii=False, default=json_default) if type(outcome.data) in [dict, list] else str(outcome.data) 
-                next_prompt += f"<tool_result>\n{datastr}\n</tool_result>\n\n"
-            next_prompt += outcome.next_prompt;  
-        if not next_prompt: 
+                tool_results.append({'tool_use_id': tid, 'content': datastr})
+            next_prompts.add(outcome.next_prompt)
+        if len(next_prompts) == 0:
             if len(handler._done_hooks) == 0: return should_exit
-            next_prompt += handler._done_hooks.pop(0)
-        next_prompt = handler.next_prompt_patcher(next_prompt, None, turn)
-        messages = [{"role": "user", "content": next_prompt}]   # just new message, history is kept in *Session
+            next_prompts.add(handler._done_hooks.pop(0))
+        next_prompt = handler.next_prompt_patcher("\n".join(next_prompts), None, turn)
+        messages = [{"role": "user", "content": next_prompt, "tool_results": tool_results}]   # just new message, history is kept in *Session
     return {'result': 'MAX_TURNS_EXCEEDED'}

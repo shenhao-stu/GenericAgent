@@ -6,7 +6,7 @@ if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent_loop import BaseHandler, StepOutcome, try_call_generator
+from agent_loop import BaseHandler, StepOutcome, json_default
 
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=[]):
     """代码执行器
@@ -305,7 +305,7 @@ class GenericAgentHandler(BaseHandler):
             except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
             except Exception as e: result = f'Error: {e}'
         else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
-        next_prompt = self._get_anchor_prompt()
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_ask_user(self, args, response):
@@ -326,8 +326,8 @@ class GenericAgentHandler(BaseHandler):
         result = web_scan(tabs_only=tabs_only, switch_tab_id=switch_tab_id, text_only=text_only)
         content = result.pop("content", None)
         yield f'[Info] {str(result)}\n'
-        if content: next_prompt = f"<tool_result>\n```html\n{content}\n```\n</tool_result>"
-        else: next_prompt = "标签页列表如上\n"  # 手动tool_result为了触发历史上下文自动压缩
+        if content: result = json.dumps(result, ensure_ascii=False, default=json_default) + f"\n```html\n{content}\n```"
+        next_prompt = "\n"
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_web_execute_js(self, args, response):
@@ -353,7 +353,7 @@ class GenericAgentHandler(BaseHandler):
         try: print("Web Execute JS Result:", smart_format(result))
         except: pass
         yield f"JS 执行结果:\n{smart_format(result)}\n"
-        next_prompt = self._get_anchor_prompt()
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(smart_format(result, max_str_len=5000), next_prompt=next_prompt)
     
     def do_file_patch(self, args, response):
@@ -367,7 +367,7 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
         result = file_patch(path, old_content, new_content)
         yield f"\n{smart_format(result)}\n"
-        next_prompt = self._get_anchor_prompt()
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_file_write(self, args, response):
@@ -398,7 +398,7 @@ class GenericAgentHandler(BaseHandler):
             else:
                 with open(path, 'a' if mode == "append" else 'w', encoding="utf-8") as f: f.write(new_content)
             yield f"[Status] ✅ {mode.capitalize()} 成功 ({len(new_content)} bytes)\n"
-            next_prompt = self._get_anchor_prompt()
+            next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
             return StepOutcome({"status": "success", 'writed_bytes': len(new_content)}, next_prompt=next_prompt)
         except Exception as e:
             yield f"[Status] ❌ 写入异常: {str(e)}\n"
@@ -434,7 +434,7 @@ class GenericAgentHandler(BaseHandler):
         if "related_sop" in args: self.working['related_sop'] = related_sop
         self.working['passed_sessions'] = 0
         yield f"[Info] Updated key_info and related_sop.\n"
-        next_prompt = self._get_anchor_prompt()
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         #next_prompt += '\n[SYSTEM TIPS] 此函数一般在任务开始或中间时调用，如果任务已成功完成应该是start_long_term_update用于结算长期记忆。\n'
         return StepOutcome({"status": "success"}, next_prompt=next_prompt)
 
@@ -493,7 +493,8 @@ class GenericAgentHandler(BaseHandler):
         else: result = "Memory Management SOP not found. Do not update memory."
         return StepOutcome(result, next_prompt=prompt)
 
-    def _get_anchor_prompt(self):
+    def _get_anchor_prompt(self, skip=False):
+        if skip: return "\n"
         h_str = "\n".join(self.history_info[-20:])
         prompt = f"\n### [WORKING MEMORY]\n<history>\n{h_str}\n</history>"
         prompt += f"\nCurrent turn: {self.current_turn}\n"

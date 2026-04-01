@@ -74,10 +74,10 @@ class GeneraticAgent:
         name = self.get_llm_name()
         if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')
         else: load_tool_schema()
-    def list_llms(self): return [(i, f"{type(b.backend).__name__}/{b.backend.default_model}", i == self.llm_no) for i, b in enumerate(self.llmclients)]
+    def list_llms(self): return [(i, f"{type(b.backend).__name__}/{b.backend.name}", i == self.llm_no) for i, b in enumerate(self.llmclients)]
     def get_llm_name(self):
         b = self.llmclient
-        return f"{type(b.backend).__name__}/{b.backend.default_model}"
+        return f"{type(b.backend).__name__}/{b.backend.name}"
 
     def abort(self):
         if not self.is_running: return
