@@ -106,8 +106,8 @@
 
 ## 验证检查点
 N+1. [ ] **[VERIFY] 启动独立验证subagent**
-     SOP: verify_sop.md
-     操作：准备verify_context.json → 启动验证subagent → 读取VERDICT → 按结果处理
+     SOP: verify_sop.md plan_sop.md
+     操作：读plan_sop.md第四章内容 → 准备verify_context.json → 启动验证subagent → 读取VERDICT → 按结果处理
      ⚠ 不可跳过，不可在未启动subagent的情况下标记[✓]
 
 ---
