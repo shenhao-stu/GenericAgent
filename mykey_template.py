@@ -107,6 +107,10 @@
 #                   默认 False。关键字段：**所有反代/镜像 Claude Code 协议的渠道
 #                   都必须置 True**（CC switch、anyrouter、claude-relay-service
 #                   等）。真 Anthropic 端点（sk-ant-）不需要开。
+#
+#   CCH 签名        部分代理会校验 Claude Code 客户端身份（CCH）。安装 xxhash
+#                   （pip install xxhash）后自动启用签名；未安装则跳过，不影响
+#                   不校验 CCH 的渠道。
 # ══════════════════════════════════════════════════════════════════════════════
 
 

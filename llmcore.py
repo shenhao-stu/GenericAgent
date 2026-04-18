@@ -85,6 +85,14 @@ def trim_messages_history(history, context_win):
             cost = sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
         print(f'[Debug] Trimmed context, current: {cost} chars, {len(history)} messages.')
 
+try: from xxhash import xxh64 as _xxh64
+except ImportError: _xxh64 = None
+
+def _cc_serialize(payload):
+    body = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if not _xxh64 or b'cch=00000;' not in body: return body
+    return body.replace(b'cch=00000;', ('cch=%05x;' % (_xxh64(body, seed=0x6E52736AC806831E).intdigest() & 0xFFFFF)).encode(), 1)
+
 def auto_make_url(base, path):
     b, p = base.rstrip('/'), path.strip('/')
     if b.endswith('$'): return b[:-1].rstrip('/')
@@ -541,16 +549,17 @@ class NativeClaudeSession(BaseSession):
             tools = [dict(t) for t in claude_tools]; tools[-1]["cache_control"] = {"type": "ephemeral"}
             payload["tools"] = tools
         else: print("[ERROR] No tools provided for this session.")
-        payload['system'] = [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral"}}]
+        payload['system'] = [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.90.527; cc_entrypoint=cli; cch=00000;"},
+            {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral"}}]
         if self.system:
             if self.fake_cc_system_prompt: messages[0]["content"].insert(0, {"type": "text", "text": self.system})
-            else: payload["system"] = [{"type": "text", "text": self.system}]
+            else: payload["system"][1] = {"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}
         user_idxs = [i for i, m in enumerate(messages) if m['role'] == 'user']
         for idx in user_idxs[-2:]:
             messages[idx] = {**messages[idx], "content": list(messages[idx]["content"])}
             messages[idx]["content"][-1] = dict(messages[idx]["content"][-1], cache_control={"type": "ephemeral"})
         try:
-            with requests.post(auto_make_url(self.api_base, "messages")+'?beta=true', headers=headers, json=payload, stream=self.stream, timeout=(self.connect_timeout, self.read_timeout)) as resp:
+            with requests.post(auto_make_url(self.api_base, "messages")+'?beta=true', headers=headers, data=_cc_serialize(payload), stream=self.stream, timeout=(self.connect_timeout, self.read_timeout)) as resp:
                 if resp.status_code != 200: raise Exception(f"HTTP {resp.status_code} {resp.content.decode('utf-8', errors='replace')[:500]}")
                 if self.stream: return (yield from _parse_claude_sse(resp.iter_lines())) or []
                 else:
