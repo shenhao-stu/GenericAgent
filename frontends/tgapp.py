@@ -84,7 +84,6 @@ async def _stream(dq, msg):
                     except Exception: pass
             break
 
-
 def _normalized_command(text):
     parts = (text or '').strip().split(None, 1)
     if not parts:
@@ -94,12 +93,10 @@ def _normalized_command(text):
         head = '/' + head[1:].split('@', 1)[0]
     return head + (f" {parts[1].strip()}" if len(parts) > 1 and parts[1].strip() else '')
 
-
 def _cancel_stream_task(ctx):
     task = ctx.user_data.pop('stream_task', None)
     if task and not task.done():
         task.cancel()
-
 
 async def _sync_commands(application):
     await application.bot.set_my_commands([BotCommand(command, description) for command, description in TELEGRAM_MENU_COMMANDS])
@@ -132,6 +129,20 @@ async def cmd_llm(update, ctx):
         lines = [f"{'→' if cur else '  '} [{i}] {name}" for i, name, cur in agent.list_llms()]
         await update.message.reply_text("LLMs:\n" + "\n".join(lines))
 
+async def handle_photo(update, ctx):
+    uid = update.effective_user.id
+    if ALLOWED and uid not in ALLOWED:
+        return await update.message.reply_text("no")
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    fpath = f"tg_{photo.file_unique_id}.jpg"
+    await file.download_to_drive(os.path.join(_TEMP_DIR, fpath))
+    caption = update.message.caption
+    prompt = f"[TIPS] 收到图片temp/{fpath}\n{caption}" if caption else f"[TIPS] 收到图片temp/{fpath}，请等待下一步指令"
+    msg = await update.message.reply_text("thinking...")
+    dq = agent.put_task(prompt, source="telegram")
+    task = asyncio.create_task(_stream(dq, msg))
+    ctx.user_data['stream_task'] = task
 
 async def handle_command(update, ctx):
     uid = update.effective_user.id
@@ -139,15 +150,12 @@ async def handle_command(update, ctx):
         return await update.message.reply_text("no")
     cmd = _normalized_command(update.message.text)
     op = cmd.split()[0] if cmd else ''
-    if op == '/help':
-        return await update.message.reply_text(HELP_TEXT)
+    if op == '/help': return await update.message.reply_text(HELP_TEXT)
     if op == '/status':
         llm = agent.get_llm_name() if agent.llmclient else '未配置'
         return await update.message.reply_text(f"状态: {'🔴 运行中' if agent.is_running else '🟢 空闲'}\nLLM: [{agent.llm_no}] {llm}")
-    if op == '/stop':
-        return await cmd_abort(update, ctx)
-    if op == '/llm':
-        return await cmd_llm(update, ctx)
+    if op == '/stop': return await cmd_abort(update, ctx)
+    if op == '/llm': return await cmd_llm(update, ctx)
     if op == '/new':
         _cancel_stream_task(ctx)
         return await update.message.reply_text(reset_conversation(agent))
@@ -164,14 +172,12 @@ async def handle_command(update, ctx):
         except Exception as e:
             return await update.message.reply_text(f"❌ 恢复失败: {e}")
     if op == '/continue':
-        if cmd != '/continue':
-            _cancel_stream_task(ctx)
+        if cmd != '/continue': _cancel_stream_task(ctx)
         return await update.message.reply_text(handle_frontend_command(agent, cmd))
     return await update.message.reply_text(HELP_TEXT)
 
 if __name__ == '__main__':
-    # Single instance lock using socket
-    try:
+    try:  # Single instance lock using socket
         _lock_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM); _lock_sock.bind(('127.0.0.1', 19527))
     except OSError: 
         print('[Telegram] Another instance is already running, skiping...')
@@ -194,21 +200,13 @@ if __name__ == '__main__':
             print(f"TG bot starting... {time.strftime('%m-%d %H:%M')}")
             # Recreate request and app objects on each restart to avoid stale connections
             request = HTTPXRequest(proxy=proxy, read_timeout=30, write_timeout=30, connect_timeout=30, pool_timeout=30)
-            app = (ApplicationBuilder()
-                   .token(mykeys['tg_bot_token'])
-                   .request(request)
-                   .get_updates_request(request)
-                   .post_init(_sync_commands)
-                   .build())
+            app = (ApplicationBuilder().token(mykeys['tg_bot_token'])
+                   .request(request).get_updates_request(request).post_init(_sync_commands).build())
             app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+            app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
             app.add_error_handler(_error_handler)
-            
-            app.run_polling(
-                drop_pending_updates=True,
-                poll_interval=1.0,
-                timeout=30,
-            )
+            app.run_polling(drop_pending_updates=True, poll_interval=1.0, timeout=30)
         except Exception as e:
             print(f"[{time.strftime('%m-%d %H:%M')}] polling crashed: {e}", flush=True)
             time.sleep(10)
