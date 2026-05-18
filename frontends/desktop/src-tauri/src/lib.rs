@@ -196,7 +196,7 @@ fn ensure_bridge_running() {
 }
 
 #[tauri::command]
-fn start_bridge_with_config(python_path: String, project_dir: String) -> Result<(), String> {
+fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, project_dir: String) -> Result<(), String> {
     // Save to settings
     let path = settings_path();
     let obj = serde_json::json!({"python_path": python_path, "project_dir": project_dir});
@@ -222,6 +222,20 @@ fn start_bridge_with_config(python_path: String, project_dir: String) -> Result<
     if !wait_for_port(14168, Duration::from_secs(15)) {
         return Err("Bridge did not become ready within 15s".into());
     }
+
+    // Navigate main window to bridge URL and show it, hide setup
+    if let Some(main_win) = app_handle.get_webview_window("main") {
+        let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
+        let _ = main_win.navigate(url);
+        // Small delay for page to start loading
+        thread::sleep(Duration::from_millis(300));
+        let _ = main_win.show();
+        let _ = main_win.set_focus();
+    }
+    if let Some(setup_win) = app_handle.get_webview_window("setup") {
+        let _ = setup_win.hide();
+    }
+
     Ok(())
 }
 
