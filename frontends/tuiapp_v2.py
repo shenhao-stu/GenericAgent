@@ -1211,7 +1211,7 @@ COMMANDS = [
     ("/cost",     "[all]",            "显示当前会话 token 用量（all = 所有会话）"),
     ("/export",   "clip|<file>|all",  "导出最后回复"),
     ("/restore",  "",                 "恢复上次模型响应日志"),
-    ("/reload-keys", "",              "重新加载 mykey.py（不重启）"),
+    ("/reload-keys", "",              "重新加载mykey.py（不重启）"),
     ("/quit",     "",                 "退出"),
 ]
 

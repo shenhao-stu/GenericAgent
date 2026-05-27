@@ -173,6 +173,17 @@ _I18N: dict[str, dict[str, str]] = {
         'cmd.rename.arg':       '<name>',
         'cmd.export.arg':       '[clip|file|all]',
         'cmd.language.arg':     '[code]',
+        'cmd.update.arg':       '[note]',
+        'cmd.update.desc':      'preview upstream commits & diff, then pull (no commit)',
+        'cmd.autorun.arg':      '[seed]',
+        'cmd.autorun.desc':     'enter autonomous operation mode',
+        'cmd.morphling.arg':    '[target]',
+        'cmd.morphling.desc':   'distill / absorb external skills',
+        'cmd.goal.arg':         '[goal]',
+        'cmd.goal.desc':        'enter Goal mode (needs condition)',
+        'cmd.hive.arg':         '[target]',
+        'cmd.hive.desc':        'enter Hive multi-worker mode',
+        'cmd.scheduler.desc':   'multi-pick reflect tasks / show cron',
 
         # status line (one-liner above input box)
         'status.asking':        '◉ waiting · Esc cancel',
@@ -368,6 +379,17 @@ _I18N: dict[str, dict[str, str]] = {
         'cmd.rename.arg':       '<name>',
         'cmd.export.arg':       '[clip|file|all]',
         'cmd.language.arg':     '[code]',
+        'cmd.update.arg':       '[备注]',
+        'cmd.update.desc':      '预览 upstream 提交与 diff，再 git pull（不 commit）',
+        'cmd.autorun.arg':      '[seed]',
+        'cmd.autorun.desc':     '进入 autonomous_operation 自主模式',
+        'cmd.morphling.arg':    '[target]',
+        'cmd.morphling.desc':   '启用 Morphling 蒸馏 / 吞噬外部技能',
+        'cmd.goal.arg':         '[goal]',
+        'cmd.goal.desc':        '进入 Goal 模式（需 condition 约束）',
+        'cmd.hive.arg':         '[target]',
+        'cmd.hive.desc':        '进入 Hive 多 worker 协作模式',
+        'cmd.scheduler.desc':   '多选启动 reflect 任务 / 查看 cron',
 
         # status line
         'status.asking':        '◉ 待答 · Esc 撤回提问',
@@ -1583,15 +1605,15 @@ def _cmds() -> list[tuple[str, str, str]]:
         ('/btw',      _t('cmd.btw.arg'),        _t('cmd.btw.desc')),
         ('/review',   _t('cmd.review.arg'),     _t('cmd.review.desc')),
         # ── slash_cmds bundle (same set as v2; descriptions kept inline
-        # rather than going through _t() so a missing translation key never
-        # blanks the row).  /scheduler stays as an interactive multi-pick
-        # menu; the rest fold into prompt-injection turns.
-        ('/update',    '[note]',           'git pull GA & report impact'),
-        ('/autorun',   '[seed]',           'enter autonomous operation mode'),
-        ('/morphling', '[target]',         'distill / absorb external skills'),
-        ('/goal',      '[goal]',           'enter Goal mode (needs condition)'),
-        ('/hive',      '[target]',         'enter Hive multi-worker mode'),
-        ('/scheduler', '',                 'multi-pick reflect tasks / show cron'),
+        # /scheduler stays an interactive multi-pick menu; the rest fold
+        # into prompt-injection turns.  All bundle rows now route through
+        # _t() so zh/en stay in sync.
+        ('/update',    _t('cmd.update.arg'),     _t('cmd.update.desc')),
+        ('/autorun',   _t('cmd.autorun.arg'),    _t('cmd.autorun.desc')),
+        ('/morphling', _t('cmd.morphling.arg'),  _t('cmd.morphling.desc')),
+        ('/goal',      _t('cmd.goal.arg'),       _t('cmd.goal.desc')),
+        ('/hive',      _t('cmd.hive.arg'),       _t('cmd.hive.desc')),
+        ('/scheduler', '',                       _t('cmd.scheduler.desc')),
         ('/rewind',   _t('cmd.rewind.arg'),     _t('cmd.rewind.desc')),
         ('/continue', _t('cmd.continue.arg'),   _t('cmd.continue.desc')),
         ('/new',      _t('cmd.new.arg'),        _t('cmd.new.desc')),

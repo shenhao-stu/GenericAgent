@@ -306,6 +306,7 @@ def start_service(name: str) -> tuple[bool, str]:
         rc = proc.poll()
         if rc is not None:
             return False, f"启动失败 (退出码 {rc}): {svc['name']}"
+        invalidate_running_cache()
         return True, f"已启动 {svc['name']} (pid={proc.pid})"
     except Exception as e:
         return False, f"启动失败: {type(e).__name__}: {e}"
@@ -340,11 +341,23 @@ def _match_service(cmdline: list[str], svc: dict) -> bool:
                for a in cmdline)
 
 
-def running_services() -> dict[str, int]:
-    """Return {service_name: pid} for every launchable service currently
-    alive on this host.  Empty dict if psutil isn't installed (degrades to
-    "/scheduler can't show running marks" rather than crashing the TUI).
-    """
+# 2s TTL cache + name-prefilter: ~2.1s → ~1.0s cold, ~0ms warm.
+# cmdline() is the per-proc cost; only pay it for python-ish survivors.
+_RUNNING_CACHE: tuple[float, dict[str, int]] | None = None
+_RUNNING_TTL = 2.0
+
+
+def invalidate_running_cache() -> None:
+    """Drop the snapshot. Call after start/stop so the next read is fresh."""
+    global _RUNNING_CACHE
+    _RUNNING_CACHE = None
+
+
+def running_services(use_cache: bool = True) -> dict[str, int]:
+    """{service_name: pid} for live services. {} if psutil missing."""
+    global _RUNNING_CACHE
+    if use_cache and _RUNNING_CACHE and time.time() - _RUNNING_CACHE[0] < _RUNNING_TTL:
+        return dict(_RUNNING_CACHE[1])
     try:
         import psutil  # type: ignore
     except Exception:
@@ -352,24 +365,21 @@ def running_services() -> dict[str, int]:
     svcs = list_launchable_services()
     out: dict[str, int] = {}
     me = os.getpid()
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in psutil.process_iter(["pid", "name"]):
         try:
             if proc.info["pid"] == me:
                 continue
             nm = (proc.info.get("name") or "").lower()
-            # cheap pre-filter: only python-ish processes
             if "python" not in nm and "py.exe" not in nm:
                 continue
-            cmd = proc.info.get("cmdline") or []
-            for svc in svcs:
-                if svc["name"] in out:
-                    continue
-                if _match_service(cmd, svc):
-                    out[svc["name"]] = proc.info["pid"]
-                    break
+            cmd = proc.cmdline()
         except Exception:
-            # psutil races (proc died mid-iter) are normal; skip silently.
             continue
+        for svc in svcs:
+            if svc["name"] not in out and _match_service(cmd, svc):
+                out[svc["name"]] = proc.info["pid"]
+                break
+    _RUNNING_CACHE = (time.time(), dict(out))
     return out
 
 
@@ -403,8 +413,10 @@ def stop_service(name: str) -> tuple[bool, str]:
                 p.kill()
             except Exception:
                 pass
+        invalidate_running_cache()
         return True, f"已停止 {name} (pid={pid})"
     except psutil.NoSuchProcess:
+        invalidate_running_cache()
         return True, f"{name} 已退出"
     except Exception as e:
         return False, f"停止失败: {type(e).__name__}: {e}"
