@@ -1137,6 +1137,10 @@ class ChatMessage:
     # Frozen `(elapsed, last_in, last_out)` at done→True; keeps the post-turn
     # card from ticking when the next turn shifts cost_tracker deltas.
     _done_summary: Optional[tuple] = field(default=None, repr=False)
+    # Frozen `(elapsed, last_in, last_out)` stamped the instant the user aborts
+    # (Ctrl+C / `/stop`). Flips the live spinner to a settled "Stopping…" line so
+    # elapsed stops climbing while the LLM stream unwinds in the background.
+    _stop_summary: Optional[tuple] = field(default=None, repr=False)
     # Per-(seg_hash, width) Text cache; survives fold-toggle re-mounts.
     _seg_render_cache: dict = field(default_factory=dict, repr=False)
 
@@ -3569,6 +3573,7 @@ class GenericAgentTUI(App[None]):
             sess.agent.abort()
             if sess.status == "running":
                 sess.status = "stopping"
+            self._mark_stopping(sess)
             self._system(f"Stop sent to #{sess.agent_id}.")
         except Exception as e:
             self._system(f"Stop failed: {e}")
@@ -4303,9 +4308,13 @@ class GenericAgentTUI(App[None]):
         choices = [(c, c) for c in candidates] + [(FREE_TEXT_LABEL, FREE_TEXT_CHOICE)]
         hint = "Space 切换 · Enter 提交 · Esc 取消" if multi else "↑/↓ 选择 · Enter 确认 · Esc 取消"
         head = f"{question}    {hint}"
+        # multi_choice hands `_finalize_multi_choice` a list of picked values;
+        # single choice hands a plain string. The agent answer must be a string,
+        # so collapse a list the same way the breadcrumb does ("; ".join).
         msg = ChatMessage(
             role="system", content=head, kind=kind, choices=choices,
-            on_select=lambda v: self._answer_ask_user(sess.agent_id, v),
+            on_select=lambda v: self._answer_ask_user(
+                sess.agent_id, "; ".join(v) if isinstance(v, list) else v),
         )
         sess.messages.append(msg)
         if sess.agent_id == self.current_id:
@@ -4956,12 +4965,20 @@ class GenericAgentTUI(App[None]):
             return f"{v:.1f}k" if v < 100 else f"{int(v)}k"
         return f"{n / 1_000_000.0:.2f}M"
 
+    def _fmt_tokens(self, last_in: int, last_out: int) -> str:
+        """`↑ N · ↓ M` for the latest call's sizes, or "" when both are zero."""
+        if last_in <= 0 and last_out <= 0:
+            return ""
+        return f"↑ {self._humanize_tokens(last_in)} · ↓ {self._humanize_tokens(last_out)}"
+
     def _spinner_annotation(self, m) -> Text:
         """Render `⠋ Gerund… (Xm Ys · ↑ N · ↓ M)` for a streaming message.
         ↑/↓ are the latest LLM call's prompt / completion sizes, gated on
         cumulative counters moving past the baselines captured at stream start
         (otherwise the prior turn's tail values leak in on prompt submit).
         """
+        if m._stop_summary is not None:
+            return self._stopping_annotation(m)
         out = Text()
         elapsed = int(time.time() - m._stream_started_at) if m._stream_started_at else 0
         last_in, last_out = self._live_call_tokens(m)
@@ -4971,8 +4988,9 @@ class GenericAgentTUI(App[None]):
         bits = []
         if m._stream_started_at:
             bits.append(_fmt_elapsed(elapsed))
-        if last_in > 0 or last_out > 0:
-            bits.append(f"↑ {self._humanize_tokens(last_in)} · ↓ {self._humanize_tokens(last_out)}")
+        tok = self._fmt_tokens(last_in, last_out)
+        if tok:
+            bits.append(tok)
         if bits:
             out.append("  (", style=C_DIM)
             out.append(" · ".join(bits), style=C_DIM)
@@ -5024,26 +5042,64 @@ class GenericAgentTUI(App[None]):
     def _done_annotation(self, m) -> Text:
         """Render `⠿ {Verb} for Xm Ys · ↑ N · ↓ M` after a turn finishes.
         Numbers frozen via `_done_summary` so re-mounts / next turn don't
-        shift the line."""
-        elapsed, last_in, last_out = m._done_summary or (0, 0, 0)
-        verb = self._done_gerund(m)
+        shift the line. A user-aborted turn reads `⠿ Stopped after Xm Ys`
+        off the abort-time `_stop_summary` instead."""
+        if m._stop_summary is not None:
+            elapsed, last_in, last_out = m._stop_summary
+            verb, glyph_style = "Stopped after", C_DIM
+        else:
+            elapsed, last_in, last_out = m._done_summary or (0, 0, 0)
+            verb, glyph_style = f"{self._done_gerund(m)} for", C_GREEN
         out = Text()
-        out.append(self._DONE_GLYPH + " ", style=C_GREEN)
-        out.append(f"{verb} for {_fmt_elapsed(int(elapsed))}", style=C_DIM)
-        if last_in > 0 or last_out > 0:
-            out.append("  · ", style=C_DIM)
-            out.append(f"↑ {self._humanize_tokens(last_in)} · ↓ {self._humanize_tokens(last_out)}",
-                       style=C_DIM)
+        out.append(self._DONE_GLYPH + " ", style=glyph_style)
+        out.append(f"{verb} {_fmt_elapsed(int(elapsed))}", style=C_DIM)
+        tok = self._fmt_tokens(last_in, last_out)
+        if tok:
+            out.append("  · " + tok, style=C_DIM)
         return out
 
-    def _capture_done_summary(self, m) -> None:
-        """Freeze `(elapsed, last_in, last_out)` once when an assistant message
-        transitions done→True. Idempotent — repeat calls are no-ops so re-mounts
-        and stream-update passes won't overwrite the snapshot."""
-        if m._done_summary is not None or not m.done: return
+    def _stopping_annotation(self, m) -> Text:
+        """Settled `⠿ Stopping… (Xm Ys · ↑ N · ↓ M)` shown from the moment the
+        user aborts until the LLM stream actually unwinds. Numbers frozen via
+        `_stop_summary` so elapsed stops climbing while we wait — the live
+        spinner would otherwise keep ticking until `done` finally flips."""
+        elapsed, last_in, last_out = m._stop_summary or (0, 0, 0)
+        out = Text()
+        out.append(self._DONE_GLYPH + " ", style=C_DIM)
+        out.append(f"Stopping… ({_fmt_elapsed(int(elapsed))}", style=C_DIM)
+        tok = self._fmt_tokens(last_in, last_out)
+        if tok:
+            out.append(" · " + tok, style=C_DIM)
+        out.append(")", style=C_DIM)
+        return out
+
+    def _freeze_summary(self, m) -> tuple:
+        """Snapshot `(elapsed, last_in, last_out)` at the current instant."""
         elapsed = (time.time() - m._stream_started_at) if m._stream_started_at else 0.0
-        last_in, last_out = self._live_call_tokens(m)
-        m._done_summary = (elapsed, last_in, last_out)
+        return (elapsed, *self._live_call_tokens(m))
+
+    def _capture_done_summary(self, m) -> None:
+        """Freeze the turn's numbers once it flips done→True. Idempotent, so
+        re-mounts and stream-update passes never overwrite the snapshot."""
+        if m._done_summary is None and m.done:
+            m._done_summary = self._freeze_summary(m)
+
+    def _capture_stop_summary(self, m) -> None:
+        """Freeze the turn's numbers the instant the user aborts. Idempotent —
+        the first Ctrl+C / `/stop` wins so a late real abort can't bump elapsed."""
+        if m._stop_summary is None:
+            m._stop_summary = self._freeze_summary(m)
+
+    def _mark_stopping(self, sess) -> None:
+        """Freeze every in-flight assistant in `sess` to the settled "Stopping…"
+        line and push it now, so the spinner stops climbing the instant the user
+        aborts instead of after the LLM stream unwinds in the background."""
+        for m in sess.messages:
+            if m.role == "assistant" and not m.done:
+                self._capture_stop_summary(m)
+                if m._spinner_widget is not None:
+                    try: m._spinner_widget.update(self._stopping_annotation(m))
+                    except Exception: pass
 
     def _has_streaming(self) -> bool:
         if self.current_id is None:
