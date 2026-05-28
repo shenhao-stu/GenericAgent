@@ -21,6 +21,8 @@ import sys
 import tempfile
 import threading
 import time
+import subprocess
+import shutil
 
 # Local: cross-platform shortcut-label formatter (Win/Linux "Ctrl+B" vs mac "⌃B").
 # Imported early because _TIPS at module load time uses fmt_key().
@@ -754,6 +756,87 @@ from btw_cmd import handle_frontend_command as btw_handle
 from review_cmd import handle as review_handle
 from continue_cmd import list_sessions as continue_list, extract_ui_messages as continue_extract
 from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
+
+# Cross-platform clipboard copy for /export clip. Mirrors tui_v3's native-tool
+# strategy but stays local to v2 so the Textual frontend has no dependency on
+# the raw terminal frontend module.
+_HAS_WAYLAND = bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _clipboard_run(cmd: list[str], input: bytes | None = None, timeout: float = 3.0) -> bytes | None:
+    try:
+        r = subprocess.run(cmd, input=input, capture_output=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _copy_to_clipboard_win32(text: str) -> bool:
+    """Copy Unicode text on Windows without going through console code pages."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        GMEM_MOVEABLE = 0x0002
+        CF_UNICODETEXT = 13
+
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalFree.restype = wintypes.HGLOBAL
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        data = text.encode("utf-16-le") + b"\x00\x00"
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            return False
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            kernel32.GlobalFree(handle)
+            return False
+        ctypes.memmove(locked, data, len(data))
+        kernel32.GlobalUnlock(handle)
+
+        if not user32.OpenClipboard(None):
+            kernel32.GlobalFree(handle)
+            return False
+        try:
+            user32.EmptyClipboard()
+            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                kernel32.GlobalFree(handle)
+                return False
+            # Ownership transferred to the clipboard; do not free `handle`.
+            return True
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return False
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    data = text.encode("utf-8")
+    if sys.platform == "darwin":
+        return _clipboard_run(["pbcopy"], input=data) is not None
+    if sys.platform == "win32":
+        return _copy_to_clipboard_win32(text)
+    if _HAS_WAYLAND and shutil.which("wl-copy"):
+        return _clipboard_run(["wl-copy"], input=data) is not None
+    if shutil.which("xclip"):
+        return _clipboard_run(["xclip", "-selection", "clipboard"], input=data) is not None
+    if shutil.which("xsel"):
+        return _clipboard_run(["xsel", "--clipboard", "--input"], input=data) is not None
+    return False
 
 AgentFactory = Callable[[], Any]
 
@@ -2068,6 +2151,17 @@ class InputArea(TextArea):
     def action_newline(self) -> None:
         self._insert_via_keyboard("\n")
 
+    def _shift_is_physically_down(self) -> bool:
+        """Best-effort fallback for terminals/Textual builds that report Shift+Enter as plain Enter."""
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            # VK_SHIFT = 0x10.  High bit means the key is currently down.
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000)
+        except Exception:
+            return False
+
     async def _on_paste(self, event: events.Paste) -> None:
         # Terminal Ctrl+V in bracketed-paste mode lands here, bypassing action_paste.
         if self.read_only:
@@ -2157,7 +2251,11 @@ class InputArea(TextArea):
             if row == len(lines) - 1 and col == len(lines[-1]):
                 if self._history_down():
                     event.stop(); event.prevent_default(); return
-        if event.key == "enter":  # newline keys are bound separately
+        if event.key == "enter":  # plain Enter submits; physical Shift+Enter inserts newline
+            if self._shift_is_physically_down():
+                event.stop(); event.prevent_default()
+                self.action_newline()
+                return
             event.stop(); event.prevent_default()
             self.post_message(self.Submitted(self, self.text))
             return
@@ -3091,6 +3189,7 @@ class GenericAgentTUI(App[None]):
             for m in s.messages:
                 m._cache_key = None
                 m._cached_body = None
+                m._seg_render_cache.clear()
                 m._segment_widgets = []
                 m._segment_sig = ()
                 m._role_widget = None
@@ -4203,7 +4302,10 @@ class GenericAgentTUI(App[None]):
             if not text:
                 return "❌ 还没有可导出的回复"
             if kind == "clip":
-                return f"📋 最后一轮回复:\n\n{wrap_for_clipboard(text)}"
+                payload = wrap_for_clipboard(text)
+                if _copy_to_clipboard(payload):
+                    return "✅ 已复制最后一轮回复到剪贴板"
+                return f"⚠️ 自动复制失败，请手动复制:\n\n{payload}"
             if kind == "file":
                 if not filename:
                     from datetime import datetime as _dt
