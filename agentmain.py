@@ -252,12 +252,12 @@ if __name__ == '__main__':
                     if hasattr(mod, 'init'): mod.init(_reflect_args)
                     print('[Reflect] reloaded')
                 except Exception as e: print(f'[Reflect] reload error: {e}')
-            time.sleep(getattr(mod, 'INTERVAL', 5))
             try: task = mod.check()
             except Exception as e: 
-                print(f'[Reflect] check() error: {e}'); continue
+                print(f'[Reflect] check() error: {e}'); task = None
             if task and task == '/exit': break
-            if task is None: continue
+            if not task:
+                time.sleep(getattr(mod, 'INTERVAL', 5)); continue
             print(f'[Reflect] triggered: {task[:80]}')
             dq = agent.put_task(task, source='reflect')
             try:
