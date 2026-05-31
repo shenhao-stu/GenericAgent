@@ -52,7 +52,7 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo build --release
 
-      - name: Build (macOS universal: x86_64 + arm64)
+      - name: "Build (macOS universal: x86_64 + arm64)"
         if: runner.os == 'macOS'
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
@@ -87,30 +87,24 @@ jobs:
             cp target/release/tui_v4 dist/
           fi
           cp scripts/ga_bridge.py dist/
-          cat > dist/README.txt <<'EOF'
-          tui_v4 — GenericAgent terminal UI (Rust + ratatui)
-          ===================================================
-
-          This bundle contains:
-            * tui_v4 (the native binary) and tui_v4.exe on Windows
-            * ga_bridge.py (the Python bridge to the GenericAgent core)
-
-          REQUIREMENTS
-            * A GenericAgent checkout (https://github.com/shenhao-stu/GenericAgent)
-              with a configured mykey.py (at least one LLM channel).
-            * Python 3.10+ on PATH (the bridge runs `python`/`python3`).
-
-          RUN
-            1. Point the UI at your GA checkout:
-                 export GENERICAGENT_ROOT=/path/to/GenericAgent      (macOS/Linux)
-                 set    GENERICAGENT_ROOT=C:\path\to\GenericAgent     (Windows)
-            2. (Optional) Use the bundled bridge instead of the one in your checkout:
-                 export GA_TUI_BRIDGE=/path/to/this/ga_bridge.py
-            3. Launch:  ./tui_v4        (or tui_v4.exe on Windows)
-
-          `tui_v4 --version` prints the build version so you can confirm freshness.
-          `tui_v4 --help` lists all flags.
-          EOF
+          {
+            echo "tui_v4 - GenericAgent terminal UI (Rust + ratatui)"
+            echo ""
+            echo "Bundle: the tui_v4 binary (tui_v4.exe on Windows) + ga_bridge.py"
+            echo "(the Python bridge to the GenericAgent core)."
+            echo ""
+            echo "REQUIREMENTS"
+            echo "  * A GenericAgent checkout (github.com/shenhao-stu/GenericAgent)"
+            echo "    with a configured mykey.py (at least one LLM channel)."
+            echo "  * Python 3.10+ on PATH (the bridge runs python/python3)."
+            echo ""
+            echo "RUN"
+            echo "  1. Point the UI at your GA checkout via GENERICAGENT_ROOT."
+            echo "  2. (Optional) GA_TUI_BRIDGE can point at this bundled ga_bridge.py."
+            echo "  3. Launch ./tui_v4 (or tui_v4.exe on Windows)."
+            echo ""
+            echo "tui_v4 --version prints the build version; --help lists all flags."
+          } > dist/README.txt
 
       # ---- package per-OS -------------------------------------------------
       - name: Package (Linux)
