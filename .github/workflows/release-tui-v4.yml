@@ -1,0 +1,152 @@
+name: release-tui-v4
+
+# Builds tui_v4 (Rust + ratatui) for Linux, Windows and macOS and publishes the
+# binaries to a GitHub Release. A macOS .dmg can ONLY be produced on a macOS
+# runner, so cross-platform packaging lives here rather than on the dev machine.
+#
+# Trigger: push a tag like `tui-v4-v0.2.0` (the release is created/updated from
+# the matrix jobs). `workflow_dispatch` lets you dry-run a build without a tag
+# (artifacts are uploaded to the run; no Release is published).
+
+on:
+  push:
+    tags:
+      - 'tui-v4-v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+    working-directory: frontends/tuiapp_v4
+
+jobs:
+  build:
+    name: build-${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: windows-latest
+            label: windows-x86_64
+          - os: macos-latest
+            label: macos-universal
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontends/tuiapp_v4
+
+      # ---- build ----------------------------------------------------------
+      - name: Build (Linux / Windows native)
+        if: runner.os != 'macOS'
+        run: cargo build --release
+
+      - name: Build (macOS universal: x86_64 + arm64)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/tui_v4 \
+            target/x86_64-apple-darwin/release/tui_v4 \
+            target/aarch64-apple-darwin/release/tui_v4
+          file target/release/tui_v4
+
+      # ---- smoke test the freshly-built binary (proves it runs) -----------
+      - name: Smoke (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          ./target/release/tui_v4 --version
+          ./target/release/tui_v4 --smoke
+
+      - name: Smoke (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ./target/release/tui_v4.exe --version
+          ./target/release/tui_v4.exe --smoke
+
+      # ---- stage the artifact (binary + python bridge + README) -----------
+      - name: Stage dist
+        run: |
+          rm -rf dist && mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/tui_v4.exe dist/
+          else
+            cp target/release/tui_v4 dist/
+          fi
+          cp scripts/ga_bridge.py dist/
+          cat > dist/README.txt <<'EOF'
+          tui_v4 — GenericAgent terminal UI (Rust + ratatui)
+          ===================================================
+
+          This bundle contains:
+            * tui_v4 (the native binary) and tui_v4.exe on Windows
+            * ga_bridge.py (the Python bridge to the GenericAgent core)
+
+          REQUIREMENTS
+            * A GenericAgent checkout (https://github.com/shenhao-stu/GenericAgent)
+              with a configured mykey.py (at least one LLM channel).
+            * Python 3.10+ on PATH (the bridge runs `python`/`python3`).
+
+          RUN
+            1. Point the UI at your GA checkout:
+                 export GENERICAGENT_ROOT=/path/to/GenericAgent      (macOS/Linux)
+                 set    GENERICAGENT_ROOT=C:\path\to\GenericAgent     (Windows)
+            2. (Optional) Use the bundled bridge instead of the one in your checkout:
+                 export GA_TUI_BRIDGE=/path/to/this/ga_bridge.py
+            3. Launch:  ./tui_v4        (or tui_v4.exe on Windows)
+
+          `tui_v4 --version` prints the build version so you can confirm freshness.
+          `tui_v4 --help` lists all flags.
+          EOF
+
+      # ---- package per-OS -------------------------------------------------
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf tui_v4-${{ matrix.label }}.tar.gz .
+
+      - name: Package (Windows zip)
+        if: runner.os == 'Windows'
+        run: |
+          powershell -NoProfile -Command "Compress-Archive -Path dist/* -DestinationPath tui_v4-${{ matrix.label }}.zip -Force"
+
+      - name: Package (macOS dmg + tar.gz)
+        if: runner.os == 'macOS'
+        run: |
+          tar -C dist -czf tui_v4-${{ matrix.label }}.tar.gz .
+          hdiutil create -volname "tui_v4" -srcfolder dist -ov -format UDZO "tui_v4-${{ matrix.label }}.dmg"
+
+      # ---- upload to the run (always) -------------------------------------
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui_v4-${{ matrix.label }}
+          path: |
+            frontends/tuiapp_v4/tui_v4-${{ matrix.label }}.tar.gz
+            frontends/tuiapp_v4/tui_v4-${{ matrix.label }}.zip
+            frontends/tuiapp_v4/tui_v4-${{ matrix.label }}.dmg
+          if-no-files-found: ignore
+
+      # ---- publish to a Release (tag pushes only) -------------------------
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            frontends/tuiapp_v4/tui_v4-${{ matrix.label }}.tar.gz
+            frontends/tuiapp_v4/tui_v4-${{ matrix.label }}.zip
+            frontends/tuiapp_v4/tui_v4-${{ matrix.label }}.dmg
+          fail_on_unmatched_files: false
+          generate_release_notes: true
