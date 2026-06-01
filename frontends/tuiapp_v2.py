@@ -749,6 +749,29 @@ FRONTENDS_DIR = os.path.dirname(os.path.abspath(__file__))
 if FRONTENDS_DIR not in sys.path:
     sys.path.insert(0, FRONTENDS_DIR)
 
+_TASK_DIR_GLOB = os.path.join(FRONTENDS_DIR, '..', 'temp', '_tui_v2_*')
+
+
+def _rmdir_if_empty(path: Optional[str]) -> None:
+    """Best-effort remove a signal task_dir once it holds no in-flight files.
+    `os.rmdir` only succeeds on an empty dir, so a stray `_intervene` still
+    pending consumption is never clobbered."""
+    if not path:
+        return
+    try: os.rmdir(path)
+    except OSError: pass
+
+
+def _sweep_stale_task_dirs() -> None:
+    """Delete empty `temp/_tui_v2_*` signal dirs left by prior runs (incl.
+    crashes).  Empty == no pending signal, so removal is safe even while
+    another live instance owns one — its writer re-creates lazily on the
+    next inject."""
+    import glob as _glob
+    for d in _glob.glob(_TASK_DIR_GLOB):
+        if os.path.isdir(d):
+            _rmdir_if_empty(d)
+
 # Side-effect imports activate /btw + /continue monkey-patches.
 import chatapp_common  # noqa: F401
 from chatapp_common import format_restore
@@ -1356,6 +1379,29 @@ class ChoiceList(OptionList):
         except Exception:
             pass
 
+    def on_key(self, event) -> None:
+        # Inside `/continue`'s SearchablePicker, Up on the first row returns
+        # focus to the search box (mirrors Down going search → list), closing
+        # the navigation loop. No-op for ChoiceLists mounted outside a
+        # SearchablePicker (other pickers have no `_search_input` parent), so
+        # this stays scoped to `/continue`.
+        if event.key != "up":
+            return
+        search = getattr(self.parent, "_search_input", None)
+        if search is None:
+            return
+        if self.highlighted not in (None, 0):
+            return
+        try:
+            # Clear the highlight on the way out so the search box doesn't show
+            # row 0 as still-selected, and the next Down re-enters at the first
+            # row (cursor_down from None → 0) instead of skipping to the second.
+            self.highlighted = None
+            search.focus()
+        except Exception:
+            pass
+        event.stop(); event.prevent_default()
+
 
 class LazyChoiceList(ChoiceList):
     """ChoiceList that materializes options in bounded batches.
@@ -1683,14 +1729,30 @@ class SearchableChoiceList(Vertical):
         if not self._search_input.has_focus:
             return
         key = event.key
-        if key in ("down", "up", "pageup", "pagedown", "home", "end"):
+        if key == "up":
+            # Up from the search box wraps around to the BOTTOM of the list, so
+            # the loop is search ↓→ list top ... list top ↑→ search ↑→ list
+            # bottom. Land on the last row directly.
+            try:
+                self.picker.focus()
+                last = getattr(self.picker, "action_last", None)
+                if last is not None:
+                    last()
+                else:
+                    n = getattr(self.picker, "option_count", 0)
+                    if n:
+                        self.picker.highlighted = n - 1
+            except Exception:
+                pass
+            event.stop(); event.prevent_default()
+            return
+        if key in ("down", "pageup", "pagedown", "home", "end"):
             try:
                 self.picker.focus()
                 # Replay one step so the very first arrow doesn't get swallowed
                 # by the focus change. Subsequent arrows go straight to the picker.
                 action = {
                     "down": self.picker.action_cursor_down,
-                    "up": self.picker.action_cursor_up,
                     "pagedown": getattr(self.picker, "action_page_down", None),
                     "pageup": getattr(self.picker, "action_page_up", None),
                     "home": getattr(self.picker, "action_first", None),
@@ -1702,6 +1764,18 @@ class SearchableChoiceList(Vertical):
                 pass
             event.stop(); event.prevent_default()
             return
+        if key == "right":
+            # Right commits the highlight ONLY when the caret is already at the
+            # end of the query — otherwise let the Input consume it so Right
+            # still moves the caret within the search text (the box must stay
+            # editable). Without this guard Right was always swallowed and the
+            # cursor could never move right inside `/continue`'s search box.
+            try:
+                at_end = self._search_input.cursor_position >= len(self._search_input.value or "")
+            except Exception:
+                at_end = True
+            if not at_end:
+                return
         if key in ("enter", "right"):
             try:
                 self.picker.action_select()
@@ -2760,6 +2834,7 @@ class GenericAgentTUI(App[None]):
         yield Static(render_bottombar(), id="bottombar")
 
     def on_mount(self) -> None:
+        _sweep_stale_task_dirs()  # clear empty signal dirs left by prior runs
         self.add_session("main")
         self._system(f"Welcome to GenericAgent TUI. 按 / 唤起命令面板，{fmt_key('ctrl+n')} 新建会话。")
 
@@ -2861,13 +2936,16 @@ class GenericAgentTUI(App[None]):
         agent = self.agent_factory()
         try: agent.inc_out = True
         except Exception: pass
-        # Per-session task_dir enables ga's `_stop` / `_keyinfo` consume
-        # paths (agentmain.py:158, ga.py:575).  PID+session scoped so
-        # concurrent sessions don't share signal files.
+        # Per-session task_dir path enables ga's `_intervene` / `_keyinfo`
+        # consume paths (ga.py:575).  PID+session scoped so concurrent
+        # sessions don't share signal files.  We only set the *path* here —
+        # the dir is created lazily by the writer (`_session_intervene_path`)
+        # when a signal is actually injected.  Eager makedirs left a stale
+        # empty `temp/_tui_v2_<pid>_<id>` behind for every session that never
+        # used intervene; `consume_file` tolerates a missing dir.
         try:
             agent.task_dir = os.path.join(FRONTENDS_DIR, '..', 'temp',
                                           f'_tui_v2_{os.getpid()}_{agent_id}')
-            os.makedirs(agent.task_dir, exist_ok=True)
         except Exception:
             pass
         sess = AgentSession(agent_id=agent_id, name=name or f"agent-{agent_id}", agent=agent)
@@ -3690,7 +3768,8 @@ class GenericAgentTUI(App[None]):
     def _cmd_close(self, args, raw):
         if len(self.sessions) <= 1:
             self._system("Cannot close the last session."); return
-        del self.sessions[self.current_id]
+        closed = self.sessions.pop(self.current_id)
+        _rmdir_if_empty(getattr(closed.agent, 'task_dir', None))
         self.current_id = next(iter(self.sessions))
         self._refresh_all()
 
@@ -4537,6 +4616,10 @@ class GenericAgentTUI(App[None]):
 
     def on_unmount(self) -> None:
         self._reset_terminal_title()
+        # Drop this run's empty signal dirs on graceful exit; the startup
+        # sweep mops up anything a crash leaves behind.
+        for s in list(self.sessions.values()):
+            _rmdir_if_empty(getattr(s.agent, 'task_dir', None))
 
     def _run_shell(self, cmd: str) -> None:
         """`!cmd` magic: run `cmd` in the user's shell (Git Bash / pwsh /
@@ -5825,7 +5908,16 @@ class GenericAgentTUI(App[None]):
                     last_widget.update(rendered)
             else:
                 last_widget._ga_render = None
-                last_widget.update(Text.from_ansi(last_text, style=C_FG))
+                # Normalise CRLF → LF before from_ansi. On Windows child stdout
+                # is `\r\n`; from_ansi treats `\r` as a carriage return, so each
+                # line's text gets overwritten/erased by its own trailing `\r`
+                # and the whole `[Stdout]` block renders as blank lines until the
+                # turn finishes (the done-state Markdown render strips `\r`). We
+                # show the output as-is otherwise — blank-line runs are left for
+                # Markdown to fold on completion. Lone `\r` (no `\n`) is kept so
+                # progress-bar overwrites still work.
+                display = last_text.replace("\r\n", "\n")
+                last_widget.update(Text.from_ansi(display, style=C_FG))
             if m.done and m._spinner_widget is not None:
                 # Convert the live spinner into the post-turn ⠿ card in place.
                 self._capture_done_summary(m)

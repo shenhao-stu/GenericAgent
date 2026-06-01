@@ -1077,6 +1077,9 @@ def _grab_clipboard_file() -> tuple[str, bool] | None:
 def _cleanup():
     if os.path.isdir(_TEMP_DIR):
         shutil.rmtree(_TEMP_DIR, ignore_errors=True)
+    # Drop this run's signal dir if it never accumulated an in-flight file.
+    try: _rmdir_if_empty(os.path.join(_ROOT, 'temp', f'_tui_v3_{os.getpid()}'))
+    except Exception: pass
 
 atexit.register(_cleanup)
 
@@ -1333,12 +1336,13 @@ class AgentBridge:
             self.agent.llmclient = self.agent.llmclients[llm_no % len(self.agent.llmclients)]
         self.agent.inc_out = True
         self.agent.verbose = True
-        # task_dir enables ga's `_stop` / `_keyinfo` / `_intervene` consume
-        # paths.  PID-scoped dir so concurrent v3 processes don't share
-        # signal files.
+        # task_dir path enables ga's `_keyinfo` / `_intervene` consume paths.
+        # PID-scoped so concurrent v3 processes don't share signal files.
+        # Only the *path* is set here; the dir is created lazily by the writer
+        # (`inject_intervene`) when a signal is actually injected.  Eager
+        # makedirs left a stale empty `temp/_tui_v3_<pid>` behind for every
+        # run that never used intervene; `consume_file` tolerates a missing dir.
         self.agent.task_dir = os.path.join(_ROOT, 'temp', f'_tui_v3_{os.getpid()}')
-        try: os.makedirs(self.agent.task_dir, exist_ok=True)
-        except Exception: pass
         self.ask_user_queue: queue.Queue[AskUserEvent] = queue.Queue()
         # Wrapped user messages we appended to `_intervene` since the last
         # turn boundary.  At a non-exit boundary the file was consumed and
@@ -1934,6 +1938,25 @@ _BP_START = b'\x1b[200~'
 _BP_END = b'\x1b[201~'
 _SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 _ROOT = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _rmdir_if_empty(path: str | None) -> None:
+    """Best-effort remove a signal task_dir once empty.  `os.rmdir` only
+    succeeds on an empty dir, so a still-pending `_intervene` is never lost."""
+    if not path:
+        return
+    try: os.rmdir(path)
+    except OSError: pass
+
+
+def _sweep_stale_task_dirs() -> None:
+    """Delete empty `temp/_tui_v3_*` signal dirs left by prior runs (incl.
+    crashes).  Empty == no pending signal; a live instance re-creates lazily
+    on its next inject."""
+    import glob as _glob
+    for d in _glob.glob(os.path.join(_ROOT, 'temp', '_tui_v3_*')):
+        if os.path.isdir(d):
+            _rmdir_if_empty(d)
 
 
 # ── terminal window title (OSC 0) ────────────────────────────────────────
@@ -5557,6 +5580,7 @@ def main(argv: list[str] | None = None) -> int:
     if not sys.stdin.isatty():
         print(_t('err.no_tty'))
         return 1
+    _sweep_stale_task_dirs()  # clear empty signal dirs left by prior runs
     SB().run()
     return 0
 

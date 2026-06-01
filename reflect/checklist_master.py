@@ -53,13 +53,12 @@ def _prompt(data, new_posts):
     if new_posts:
         trigger = "有新回帖，去BBS查看并验收"
     elif any(t["result"] is None for t in data.get("tasks", [])):
-        trigger = "有未完成任务，继续执行" if not bbs else "有未完成任务，派发或自己执行"
-    else:
-        trigger = "无未完成任务，该plan下一步了"
-    lines = [f"你是 Checklist Master（{mode}模式）。阅读 checklist_sop.md 按 Master 循环行事。"]
-    if bbs:
-        lines.append(f"BBS API文档（requests）: GET {bbs['url']}/readme?key={bbs['key']}")
+        trigger = "有未完成任务，继续执行" if not bbs else "有未完成任务，派发"
+    else: trigger = "无未完成任务，该plan下一步了"
+    lines = [f"你是 Checklist Master（{mode}模式）。阅读 checklist_sop.md 21行之后按 Master 行事。"]
+    if bbs: lines.append(f"BBS API文档（requests）: GET {bbs['url']}/readme?key={bbs['key']}")
     lines.append(f"目标: {goal}")
     lines.append(f"唤醒原因: {trigger}")
     lines.append(f'用 checklist_helper 的 CL("{_folder}") 管理状态（look/add/mark/close）。按决策树行动。')
+    if bbs: lines.append("【禁止】你只负责派发+轮询+验收，绝不自己执行任务。")
     return "\n".join(lines)

@@ -6,14 +6,14 @@
 ```python
 from checklist_helper import CL
 cl = CL("cl_xxx", goal="<用户要求任务，尽量原样>")
-cl.start_master()
+cl.start_master()   # Only for Booter，Master严禁调用
 ```
 
 **MapReduce 模式**（多人，master派发+worker执行）：
 ```python
 from checklist_helper import CL
 cl = CL("cl_xxx", goal="<用户要求任务，尽量原样>", workers=2)
-cl.start_master()
+cl.start_master()   # Only for Booter，Master严禁调用
 ```
 
 goal 写法：只写「做什么 + 参考哪个SOP」，不写怎么做。Master 自己读 SOP 决定 plan。
@@ -55,7 +55,7 @@ B 要等 A 的结果 → 不要硬拆，串行做。
 
 ```
 cl.look()
-├─ 有未完成任务 → 去 BBS 派发（mapreduce模式）/ 挑最简单的**不派发**自己干 / 自己干（无worker checklist模式）
+├─ 有未完成任务 → 去 BBS 派发（mapreduce模式）/ 自己干（无worker checklist模式）
 └─ 全部完成
     ├─ 用户最终目标已达成 → close()
     └─ 最终目标未达成 → plan 下一步
@@ -72,7 +72,7 @@ worker无法看到add的任务，只能看到BBS！
 每条任务 prompt 须**自包含**——worker 没有 master 的上下文。
 每次最多只派发3个任务，不要一次性把所有任务贴到bbs上。
 worker足够聪明，只允许写目标和需要的信息，不要干预
-**master不允许执行已经派发出去的任务，会导致重复执行！**
+**master不允许执行已经派发出去的任务，会导致重复执行！** 没事就sleep！
 
 写 prompt 要点：
 1. **背景**：worker 需要的信息直接给（路径、数据、约定），不要假设 worker 知道

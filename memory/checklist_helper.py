@@ -20,9 +20,9 @@ class CL:
         else:
             self._d = {"closed": False, "goal": goal, "bbs": None, "tasks": []}
             self._save()
-        if workers > 0:
-            self._ensure_bbs()
-            self.start_worker(workers)
+            if workers > 0:
+                self._ensure_bbs()
+                self.start_worker(workers)
 
     @property
     def tasks(self): return self._d["tasks"]
@@ -55,7 +55,9 @@ class CL:
         for t in texts:
             self.tasks.append({"id": nid, "text": t, "result": None, "ts": int(time.time())})
             ids.append(nid); nid += 1
-        self._save(); return ids
+        self._save(); 
+        print('task added, must reread checklist SOP before start executing ...');
+        return ids
 
     def mark(self, tid, result):
         for t in self.tasks:
@@ -83,6 +85,18 @@ class CL:
                 "--base_url", self.bbs_url, "--board_key", self.bbs_key, "--name", f"w{i+1}"], **_PK)
             if i < n - 1: time.sleep(5)
 
+    def _pid_alive(self, pid):
+        if not pid: return False
+        try:
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
+            return str(pid) in r.stdout
+        except Exception: return False
+
     def start_master(self):
-        subprocess.Popen(["python", str(_MAIN), "--reflect", str(_M_RE),
+        old_pid = self._d.get("master_pid")
+        if old_pid and self._pid_alive(old_pid):
+            print(f"[CL] master already running (PID {old_pid}), skip")
+            return
+        p = subprocess.Popen(["python", str(_MAIN), "--reflect", str(_M_RE),
             "--mr_folder", str(self.folder.resolve())], **_PK)
+        self._d["master_pid"] = p.pid; self._save()
