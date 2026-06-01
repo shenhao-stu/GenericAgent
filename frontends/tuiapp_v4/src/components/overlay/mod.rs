@@ -42,7 +42,10 @@ pub fn render(frame: &mut Frame, area: Rect, ov: &Overlay, app: &AppState, theme
             info::render_btw(frame, area, question, answer.as_deref(), theme, lang)
         }
         Overlay::Scheduler(sched) => super::scheduler::render(frame, area, sched, theme, lang),
-        Overlay::Continue(picker) => super::continue_picker::render(frame, area, picker, theme, lang),
+        Overlay::Continue(picker) => {
+            let now_secs = super::continue_picker::wall_secs();
+            super::continue_picker::render(frame, area, picker, theme, lang, now_secs)
+        }
         Overlay::Effects => effects::render_effects_demo(frame, area, app, theme),
         Overlay::EffortSlider(slider) => effort::render_effort_slider(frame, area, slider, theme),
     }

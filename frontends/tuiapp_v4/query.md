@@ -1,14 +1,21 @@
-> **实现状态 — Round 3（2026-06-01）：全部 12 项已实现并经 Monitor 对抗验证。**
-> 重构先行（高内聚/低耦合，符合 code_review_principles + qianxuesen 系统设计）：5 个 god-file 拆分到位（main.rs 2505→607、app/mod.rs 2078→705、components/mod.rs→cockpit/、overlay.rs→overlay/、render.rs<600），`AppEvent` 总线切断 UI↔bridge 传输耦合（`send_active` 归零）；**331 测试全绿 / 0 警告 / 4 条 parity 不变量守住**。
+> **实现状态 — Round 4（2026-06-01）：实现完成 + Monitor 验证（待你实跑确认观感）。v0.4.0。**
+> **诚实复盘：Round 3 的「12 项全过」是假阳性** —— 验证只走 headless `--dump-frame` + 干净 fixture 单测（finalized/plain 路径），从未跑你真正看到的 **live/styled 流式路径**。本轮全部走 live/styled 验证（喂 `apply_bridge_event` + 扫 styled 帧 + 真键鼠事件），并用渲染态对抗 Monitor 复核（非"测试绿"）。
 >
-> 逐项落地（√ = 代码+渲染证据确认；**live** = 需你实跑确认观感）：
-> - **Q1** √ 历史输入整条 rgb(58,58,58) + `❯` 前缀 · **Q2** √ 默认关鼠标捕获→终端原生拖选复制、去 ctrl+shift+c、复制走 `block.source` 无 `\n` · **Q3** √ 行内/块级 latex 原子换行不再打碎 + 流式 holdback + 边到边实时渲染 · **Q4** √ spinner ↑↓ token 实时
-> - **Q5** √ 左键进 session/右键回对话 · **Q6** √ 对齐 v2 快捷键 + shift/ctrl+enter 换行 + 命令去重（别名标记） · **Q7** √ `❯❯ GenericAgent` slogan + llm·model·dir·session 头 + 输出框上方完成行 + 下方两行(session info / ⎿ Tips) + 去 `❯ chat` + `/keybindings` · **Q8** √ 工具展开/折叠 summary + 点击 ▸ 折叠任意节点 + 零 "Turn N"
-> - **Q9** √ spinner 只用 `⠿`、脸只在 pet、tab 默认 bear · **Q10** √ 命令不重复/中英文齐/`/scheduler` 真反射模式(9 reflect + 8 cron，无假 09:00)/`/mouse` 默认开并移除/`/continue` 重放全部历史去 ✅ · **Q11** √ 主题改名 `default` + 深浅色重设计 + 每命令边框/字符特效(goal=Pulse◆ / hive=Orbit⬡ / conductor=Sweep▸ / morphling=Rainbow◆) · **Q12** √ 彩蛋/tips 双语 + `@` 缓存提速 + ctrl+s 不卡
+> **逐项已落地并经渲染确认（√）：** 多行圆角 header 盒(`>_ GenericAgent`/model·dir·session 各一行) √ · **llm=codex-pro、model=gpt-5.5**（取活跃配置名/真模型，非路由 MixinSession）√ · tui_v3 工具调用边框盒(`╭─ web_scan ✕ error ·t1 ─╮`/`│ … │`/`╰─╯`) √ · Turn N 彻底消失(3 种形态×10 场景 grep=0) √ · markdown 标题去掉裸 `##`(粗体+色) √ · 叙述 ` ▸ summary`(accent 三角+dim) √ · spinner 动态 braille→完成停 `⠿` √ · 状态行 `(elapsed · ↓ N tokens · thinking <effort>)` + `⎿ Tip:` 续行挂其下 √ · footer effort→非思考模式/ctx 显示/llm·model 同 header √ · `/pets` 默认 bear + 去 spinner 配置 + tab=动态 pet+session+GenericAgent √ · `/goal /hive /conductor /morphling` 特效 mono 也可见(像 `!`) + 删 `/effects` √ · `@` 全量(滚动窗口+`…+N more`+确定性 BFS) √ · `/continue` 去抖搜索+相对时间+`/continue N` √ · 滚轮可滚(鼠标捕获默认开) √(代码级，**待实跑确认**)。**354 测试 / 0 警告 / 4 parity 不变量守住。**
 >
-> **live 待你实跑确认（headless 无法判定的观感）：** 输入 `/goal /hive /conductor /morphling` 时的边框+字符特效配色与流动是否优雅；你终端里拖选复制是否顺手；整体审美是否到位。**不满意的项告诉我，继续迭代直到满足。**
+> **待你实跑确认（headless 判不了的观感）：** 滚轮滚动 + Shift+拖选复制是否顺手（鼠标捕获默认开的代价；`Ctrl+Shift+M`/`/mouse` 可切回纯原生拖选）；各命令特效配色/流动；多行 header、工具盒、spinner 整体审美。计划 `IMPLEMENTATION_PLAN_R4.md`，spec `recon/round4/R1..R6 + M1..M4`。
 
-## 原始需求
+## Round 4 需求（本轮，逐条对照实现）
+
+1. **滚动 + markdown + Turn N + 复刻 tui_v3**：① tui_v4 滚轮不能滚（修：默认开鼠标捕获，Shift+拖选复制）；② markdown 实时渲染要干净（`##` 不该裸露）；③ **绝不再出现 Turn1...**（R3 已修源头 `fold.rs`/`markdown/mod.rs`，本轮验 live/styled）；④ 工具调用复刻 tui_v3 边框盒风格（参考 `clip_20260601_134942/134922`）；⑤ header 复刻 tui_v3 多行盒（`>_ GenericAgent` + model/directory/session 各一行），**llm 直接显示配置名 `codex-pro`（不是路由 MixinSession），model 显示真模型 `gpt-5.5`/`claude-opus-4.8`**。
+2. **底部栏**：① effort 没有时显示「非思考模式」（不是 `—`）；② ctx 必须显示数值（后台 reducer 漏存 context_percent）；③ spinner 要**动态**动画、完成后才停在 `⠿`；④ `/pets` 删除所有 spinner 配置项，**默认 pet=on 且=bear**；⑤ 终端 tab 标题 = 动态 pet + session_name + GenericAgent（不要 NativeClaude 字样）。
+3. **Tip 位置**：Tip 作为 `└` 续行**直接挂在 spinner 状态行下方** —— 状态行形如 `✢ Razzmatazzing… (7m 44s · ↓ 20.3k tokens · thinking with max effort)`，下一行 `└ Tip: …`（CC 布局）。
+4. **命令特效**：`/goal /hive /conductor /morphling` 像 `!` 一样，输入即触发**输入框边框 + 命令字符本身**的特效与配色（当前在普通终端不可见 —— 边框特效被 truecolor 门控；修：基础边框 token 始终随命令变色）；**删除无用的 `/effects` 命令**。
+5. **总体**：参考 tui_v3 与 codex/claude-code 源码；高内聚低耦合、前后端分离；减少冗余注释（`code_review_principles.md`）；架构合 `qianxuesen_sop`；每轮更新 `checklist.md`；启用 Monitor 验证；清理 temp 中 tui 垃圾。
+6. **@ 补全**：当前只显示 8 行且索引是非确定 DFS 截断 —— 平衡「全」与「性能」（截断改为视图层 + 滚动窗口 + `+N more`，确定性 BFS 遍历，提高上限/后台刷新）。
+7. **/continue 搜索**：参考 `tuiapp_v2.py` 复刻搜索（去抖内容 grep + 相对时间前缀 + 可选 `/continue N`）—— 框架已存在，本轮做 parity 打磨。
+
+## 原始需求（Round 1-3 历史，留档）
 
 1. 所有历史的输入应该是整条进行颜色渲染[58,58,58]，然后应该包含❯ [例如❯ /copy]，目前的版本并没有❯，请你增加一下。
 2. 目前tui_v4.py的依旧无法进行终端的选中文本复制[然后不应该有ctrl+shift+c作为终端所有复制的功能，这完完全全的不合理]。同时我希望支持后能否进行无换行的复制，参考tuiapp_v2.py的复制逻辑，能够正常复制markdown的表格，以及多行复制，不会出现/n的情况。
@@ -22,3 +29,11 @@
 10. 请你确保所有的/命令不会出现各种重复的情况，同时所有的功能都是可用的，然后保证中英文切换时正常的，/scheduler应该包含所有的反射模式。目前似乎缺少了很多内容。请你也保证所有命令的ui渲染都时正常的，例如/status, /workflows, /rewind。目前/mouse似乎不需要的，应该是默认开启的。同时/continue后，没有正常加载所有历史的对话，只有» ✅ 已恢复 148 轮完整对话（model_responses_335438.txt），而且我之前非常明确说过不要用✅这种icon。
 11. 关于/theme请你进行深入的调研，重新设计几个适合黑底和白色的theme主题，同时命名进行更改，不要用ga-default,就用default就行了。关于/effects，请你重新进行设计，目前只有彩虹色的边框方案，请你寻找更多的方案。适配到不同的命令中，/goal /hive /conductor /morphling。同时当输入这些命令的时候，这些字符"/goal"本身也会进行特效的渲染，请你设计几个各自不同有区分度，简洁优雅，适合各自特点的边框和字符特效。
 12. 注意tips和Sleuthing…等等的彩蛋请你继续补充，也注意中英文的版本，然后注意@的渲染尽可能快速，ctrl+s不会出现卡死的情况。
+
+1. 首先tui_v4并不能滚动，同时并没有进行markdown的渲染，D:\Screenshots\clip_20260601_135249.png，而且还是有大量的Turn1...出现，你依旧死不悔改，而且也没有参考tui_v3中终端输出的工具调用的风格进行渲染输出，做的非常非常的差劲，请你仔仔细细看看tui_v3的代码，好好的进行复现。D:\Screenshots\clip_20260601_134942.png，请你参考tui_v3的整体D:\Screenshots\clip_20260601_134922.png的风格进行适配，包括一开始的>_ GenericAgent，目前tui_v4全部放在一行，这特别的不合理，而且llm应该直接就是codex-pro[MixinSession会不断路由到其他的config上，应该显示的直接就是'name'], 然后model显示的应该是gpt-5.5或者claude-opus-4.8之类的内容。2. 关于最下方的内容，effort如果没有，请你也显示非思考模式，而不是session  ·  getoken_20x  ·  —  ·  ctx —  ·  feat/tui-v4。ctx为什么也不显示呢....，而且⠿ Refactoring thoughts，我想要的是动态的spinner，完成后显示⠿，而不是一直都是⠿啊，而且/pets中请你删除所有spinner的配置呢,默认就是braille，同时默认pet是on，并且选择bear!关于terminal tab中应该也是显示动态的pets+session_name+GenericAgent啊。不需要出现NativeClaude等等的字样啊!! 3. ⎿ Tip的位置存在问题，应该参考
+✢ Razzmatazzing… (7m 44s · ↓ 20.3k tokens · thinking with max effort)
+  └ Tip: Say "fan out subagents" and Claude sends a team. Each one digs deep so nothing gets missed.
+
+4. /goal /hive /conductor /morphling依旧没有特效，输入这些命令，没有像!一样，进行输入框的特效变动以及颜色本身的变动。请你补充增加，然后删除/effects这个命令，目前并没有用
+
+5. 请你好好的进行优化啊，现在做的真的特别的差劲。请你仔细查看上述以及我之前的需求，是如何在codex和claude code实现的!!

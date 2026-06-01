@@ -35,7 +35,7 @@ pub enum PickerKind {
     /// `/theme` — LIVE PREVIEW: moving the selection previews; Enter commits, Esc
     /// reverts (the theme picker's commit/revert contract).
     Theme,
-    /// `/emoji` — pet/spinner style; preview on move, commit on Enter.
+    /// `/pets` (alias `/emoji`) — pet style; preview on move, commit on Enter.
     Emoji,
     /// `/language` — interface language; full repaint on commit.
     Language,

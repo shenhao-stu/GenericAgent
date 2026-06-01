@@ -89,6 +89,11 @@ pub fn apply_pick(text: &str, q: &AtQuery, path: &str) -> PickResult {
 /// simple, deterministic fuzzy/substring scorer (lower = better), returning the
 /// best matches first. PURE so the picker order is unit-testable.
 ///
+/// Returns the FULL ranked set (capped at [`MAX_RANKED`] as a sane upper bound so a
+/// no-op `@` over a huge index doesn't build an unbounded `Vec` per keystroke).
+/// Truncation to the visible row count is a VIEW concern handled by the dropdown's
+/// scrolling window — every matching file stays reachable here.
+///
 /// Scoring (tui_v3-style, conservative): an empty query keeps natural order; a
 /// basename prefix match beats a basename substring beats a full-path substring;
 /// ties break by shorter path then lexically. Non-matches are dropped.
@@ -97,7 +102,7 @@ pub fn rank_files(partial: &str, files: &[String]) -> Vec<String> {
     if q.is_empty() {
         let mut out = files.to_vec();
         out.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-        out.truncate(MAX_PICKER_ROWS);
+        out.truncate(MAX_RANKED);
         return out;
     }
     let mut scored: Vec<(u32, &String)> = Vec::new();
@@ -125,12 +130,17 @@ pub fn rank_files(partial: &str, files: &[String]) -> Vec<String> {
     scored
         .into_iter()
         .map(|(_, f)| f.clone())
-        .take(MAX_PICKER_ROWS)
+        .take(MAX_RANKED)
         .collect()
 }
 
-/// Max rows the `@` picker shows at once.
+/// Max rows the `@` picker shows at once (the scrolling VIEW window height).
 pub const MAX_PICKER_ROWS: usize = 8;
+
+/// Upper bound on the ranked match set [`rank_files`] returns. The dropdown scrolls
+/// a [`MAX_PICKER_ROWS`] window over this and shows a "+N more" tail; the cap only
+/// guards against materializing an enormous `Vec` on a no-op `@` over a big index.
+pub const MAX_RANKED: usize = 500;
 
 /// True if `needle` is an (in-order) subsequence of `hay` — the loosest fuzzy
 /// match, used as the last-resort tier. Both lowercased by the caller.
@@ -327,6 +337,23 @@ mod tests {
         // Subsequence fallback: "smr" hits "src/markdown/render.rs".
         let sub = rank_files("smr", &files);
         assert!(sub.iter().any(|f| f.contains("render.rs")));
+    }
+
+    #[test]
+    fn rank_files_returns_full_set_not_truncated_to_picker_rows() {
+        // Far more matches than MAX_PICKER_ROWS: rank_files must surface ALL of them
+        // (truncation is the dropdown's VIEW concern, not the data layer's), so a
+        // file ranked below the 8th row is still reachable via the scrolling window.
+        let n = MAX_PICKER_ROWS * 4;
+        let files: Vec<String> = (0..n).map(|i| format!("src/comp{i:03}.rs")).collect();
+        let ranked = rank_files("comp", &files);
+        assert_eq!(ranked.len(), n, "all matches returned, not capped at MAX_PICKER_ROWS");
+        assert!(ranked.len() > MAX_PICKER_ROWS);
+        // A late-sorting match (comp031) is present even though it's well past row 8.
+        assert!(ranked.contains(&format!("src/comp{:03}.rs", n - 1)));
+        // The MAX_RANKED upper bound still applies for a no-op (empty) query.
+        let many: Vec<String> = (0..MAX_RANKED + 50).map(|i| format!("f{i:04}.rs")).collect();
+        assert_eq!(rank_files("", &many).len(), MAX_RANKED);
     }
 
     #[test]

@@ -3,15 +3,16 @@
 //! One immediate-mode `render(frame, app, theme, now_ms)` draws the whole cockpit
 //! each frame. The vertical layout (§5 / Q7):
 //!
-//!   HEADER (1)      ❯❯ GenericAgent   llm <ch>  model <m>  dir <cwd>  session <s>
+//!   HEADER (8)      ╭ rounded box: `>_ GenericAgent` / model / directory / session ╮
 //!   SEPARATOR (1)   ▓▓▓ rainbow 7-stop, full width ▓▓▓
 //!   TRANSCRIPT (Min 0 — FLEXES to fill all remaining height)
-//!   SPINNER (1, only when busy)  <pet> <spinner> <Gerund>… 3.2s · ctx ▰▰▱
+//!   SPINNER (1, only when busy)  ⠙ <Gerund>… (3.2s · ↓ 1.6k · thinking max effort)
+//!   SPINNER-TIP (1, only when busy)  ⎿ <rotating tip>   (corner-continuation)
 //!     ─ or, when idle right after a turn ─
 //!   DONE-LINE (1)   ⠿ <Gerund> for <dur> · ↑ <in> · ↓ <out>   (frozen)
 //!   COMPOSER (flex 1..8, bordered, multi-line; hot-pink border in shell mode)
 //!   ROW1 (1)        <llm> · <model> · <effort> · <ctx> · <branch>  [conn chip]
-//!   ROW2 (1)        ⎿ <rotating tip>
+//!   ROW2 (1, idle only)  ⎿ <rotating tip>   (moves UNDER the spinner when busy)
 //!
 //! The transcript uses `Constraint::Min(0)` so it fills. Assistant blocks are
 //! rendered through the COCKPIT markdown layer (per-turn folds → `▸ summary`,
@@ -38,7 +39,7 @@ use dropdown::{composer_height, dropdown_height, render_dropdown};
 use footer::{
     render_done_line, render_separator, render_session_info, render_spinner, render_tips,
 };
-use header::render_header;
+use header::{render_header, HEADER_ROWS};
 use transcript::render_transcript;
 
 /// Max composer height (rows) before it stops growing and scrolls internally.
@@ -82,6 +83,11 @@ pub(crate) struct CockpitLayout {
     pub transcript: Rect,
     /// `Some` only when the spinner band is shown (`app.busy`).
     pub spinner: Option<Rect>,
+    /// `Some` only when the spinner is shown: the `⎿ Tip` row DIRECTLY UNDER the
+    /// spinner status line (above the composer), so the corner reads as a
+    /// continuation of the status line (Slice 5 / R4 item 5). Mirrors the
+    /// `spinner` Option wiring.
+    pub spinner_tip: Option<Rect>,
     /// `Some` only when the frozen done-line is shown (idle + a turn just ran).
     /// Mutually exclusive with `spinner` (busy XOR done) — they share the
     /// just-above-composer slot.
@@ -89,10 +95,12 @@ pub(crate) struct CockpitLayout {
     /// `Some` only when the completion dropdown has rows.
     pub dropdown: Option<Rect>,
     pub composer: Rect,
-    /// ROW 1 below the composer: runtime session info (Q7).
+    /// ROW 1 below the composer: runtime session info (Q7) — always present.
     pub info: Rect,
-    /// ROW 2 below the composer: `⎿ Tips` (Q7).
-    pub tips: Rect,
+    /// ROW 2 below the composer: `⎿ Tips`. `Some` only when IDLE; while busy the
+    /// Tip moves to `spinner_tip` (under the spinner) and this slot is gone, so
+    /// the sole below-composer row is `info`.
+    pub tips: Option<Rect>,
 }
 
 /// Compute the §5 vertical split. PURE over `(app, area)` (no state writes) so it
@@ -109,16 +117,19 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     let show_done = !show_spinner && app.last_turn_ms.is_some();
     let dropdown_rows = dropdown_height(app, area.width);
 
-    // §5 vertical split. Transcript = Min(0) so it flexes to fill. Below the
-    // composer are TWO fixed rows (Q7): row1 session info, row2 `⎿ Tips` (the old
-    // single footer+hint row is gone; the connection chip folds into row1).
+    // §5 vertical split. Transcript = Min(0) so it flexes to fill. The `⎿ Tip`
+    // travels with the spinner state (Slice 5): while BUSY it sits as a
+    // corner-continuation row right under the spinner status line (above the
+    // composer), and the sole below-composer row is row1 session info. While IDLE
+    // it returns to its row2 below-composer slot. Row1 always carries the conn chip.
     let mut constraints: Vec<Constraint> = vec![
-        Constraint::Length(1), // header
-        Constraint::Length(1), // rainbow separator
-        Constraint::Min(0),    // transcript (FLEX)
+        Constraint::Length(HEADER_ROWS), // header (multi-row rounded box, Slice 2)
+        Constraint::Length(1),           // rainbow separator
+        Constraint::Min(0),              // transcript (FLEX, shrinks for the taller header)
     ];
     if show_spinner {
-        constraints.push(Constraint::Length(1)); // spinner band
+        constraints.push(Constraint::Length(1)); // spinner status line
+        constraints.push(Constraint::Length(1)); // ⎿ tip (under the spinner)
     } else if show_done {
         constraints.push(Constraint::Length(1)); // frozen done-line
     }
@@ -127,7 +138,9 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     }
     constraints.push(Constraint::Length(composer_rows)); // composer (bordered)
     constraints.push(Constraint::Length(1)); // row1: runtime session info
-    constraints.push(Constraint::Length(1)); // row2: ⎿ Tips
+    if !show_spinner {
+        constraints.push(Constraint::Length(1)); // row2: ⎿ Tips (idle only)
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -136,40 +149,34 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
 
     // Index the chunks in order.
     let mut i = 0;
-    let header = chunks[i];
-    i += 1;
-    let sep = chunks[i];
-    i += 1;
-    let transcript = chunks[i];
-    i += 1;
-    let spinner = if show_spinner {
+    let mut next = || {
         let c = chunks[i];
         i += 1;
-        Some(c)
-    } else {
-        None
+        c
     };
-    let done = if show_done {
-        let c = chunks[i];
-        i += 1;
-        Some(c)
-    } else {
-        None
-    };
-    let dropdown = if dropdown_rows > 0 {
-        let c = chunks[i];
-        i += 1;
-        Some(c)
-    } else {
-        None
-    };
-    let composer = chunks[i];
-    i += 1;
-    let info = chunks[i];
-    i += 1;
-    let tips = chunks[i];
+    let header = next();
+    let sep = next();
+    let transcript = next();
+    let spinner = show_spinner.then(&mut next);
+    let spinner_tip = show_spinner.then(&mut next);
+    let done = show_done.then(&mut next);
+    let dropdown = (dropdown_rows > 0).then(&mut next);
+    let composer = next();
+    let info = next();
+    let tips = (!show_spinner).then(&mut next);
 
-    CockpitLayout { header, sep, transcript, spinner, done, dropdown, composer, info, tips }
+    CockpitLayout {
+        header,
+        sep,
+        transcript,
+        spinner,
+        spinner_tip,
+        done,
+        dropdown,
+        composer,
+        info,
+        tips,
+    }
 }
 
 /// Draw the chat cockpit (header / transcript / composer / 2 below-composer rows)
@@ -179,8 +186,18 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
 /// draw).
 fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64) {
     let area = frame.area();
-    let CockpitLayout { header, sep, transcript, spinner, done, dropdown, composer, info, tips } =
-        split_cockpit(app, area);
+    let CockpitLayout {
+        header,
+        sep,
+        transcript,
+        spinner,
+        spinner_tip,
+        done,
+        dropdown,
+        composer,
+        info,
+        tips,
+    } = split_cockpit(app, area);
 
     render_header(frame, header, app, theme, now_ms);
     render_separator(frame, sep, app, theme);
@@ -191,6 +208,11 @@ fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64)
     // splash still uses its own overlay; draw_ambient remains for that.
     if let Some(spin) = spinner {
         render_spinner(frame, spin, app, theme, now_ms);
+    }
+    // The `⎿ Tip` hangs as a corner-continuation directly under the spinner status
+    // line while busy (Slice 5) — drawn here, right after the spinner.
+    if let Some(tip) = spinner_tip {
+        render_tips(frame, tip, app, theme, now_ms);
     }
     if let Some(dl) = done {
         render_done_line(frame, dl, app, theme);
@@ -208,5 +230,9 @@ fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64)
         super::effects_paint::draw_composer_border_fx(frame, app, composer, now_ms, cmd);
     }
     render_session_info(frame, info, app, theme);
-    render_tips(frame, tips, app, theme, now_ms);
+    // The below-composer `⎿ Tip` row exists only when IDLE; while busy the Tip has
+    // moved up under the spinner (`spinner_tip`) and `info` is the sole row here.
+    if let Some(tip) = tips {
+        render_tips(frame, tip, app, theme, now_ms);
+    }
 }

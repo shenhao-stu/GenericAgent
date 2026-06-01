@@ -34,8 +34,10 @@ pub const DEFAULT_SKIP_DIRS: &[&str] = &[
 ];
 
 /// Cap on the number of files the picker indexes (keeps the walk bounded on a
-/// huge monorepo; the picker only needs enough to fuzzy-match).
-pub const MAX_INDEXED_FILES: usize = 5000;
+/// huge monorepo; the picker only needs enough to fuzzy-match). The walk is a
+/// deterministic BFS (see [`list_project_files`]) so the cap drops only the
+/// DEEPEST/last-sorted files, never a near-root source the user is likely to `@`.
+pub const MAX_INDEXED_FILES: usize = 20000;
 
 /// A compiled set of ignore rules (from one or more `.gitignore` files + the
 /// default skip set). PURE matching via [`IgnoreRules::is_ignored`].
@@ -208,24 +210,43 @@ fn glob_match(pat: &str, text: &str) -> bool {
 /// List project files under `root` (gitignore-aware), relative POSIX paths,
 /// bounded by [`MAX_INDEXED_FILES`]. Reads `root/.gitignore` if present. A walk
 /// error degrades to whatever was collected so far (never a panic). Effectful.
+///
+/// The frontier is a FIFO `VecDeque` used as a **breadth-first** queue, and each
+/// directory's entries are SORTED before enqueueing. So the walk visits files in a
+/// deterministic, shallow-first / alphabetical order independent of `read_dir`'s OS
+/// order — the [`MAX_INDEXED_FILES`] cap therefore drops only the DEEPEST,
+/// last-sorted files, never a near-root source the user is likely to `@`-mention
+/// (the old LIFO `Vec::pop()` DFS sorted only AFTER the cap, so it indexed an
+/// arbitrary partial slice on a big repo).
 pub fn list_project_files(root: &Path) -> Vec<String> {
+    walk_with_cap(root, MAX_INDEXED_FILES)
+}
+
+/// The BFS walk with an explicit `cap` (so the cap behavior is testable with a tiny
+/// bound instead of materializing [`MAX_INDEXED_FILES`] files). See
+/// [`list_project_files`] for the determinism / shallow-first contract.
+fn walk_with_cap(root: &Path, cap: usize) -> Vec<String> {
     let mut rules = IgnoreRules::with_defaults();
     if let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) {
         rules.add_gitignore(&text);
     }
     let mut out: Vec<String> = Vec::new();
-    let mut queue: Vec<(std::path::PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
-    while let Some((dir, prefix)) = queue.pop() {
-        if out.len() >= MAX_INDEXED_FILES {
+    let mut queue: std::collections::VecDeque<(std::path::PathBuf, String)> =
+        std::collections::VecDeque::from([(root.to_path_buf(), String::new())]);
+    while let Some((dir, prefix)) = queue.pop_front() {
+        if out.len() >= cap {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
+        // Sort this directory's children by name so the BFS frontier is processed
+        // in a deterministic order regardless of the OS read_dir order.
+        let mut children: Vec<(std::path::PathBuf, String, bool)> = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             let rel = if prefix.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{prefix}/{name}")
             };
@@ -233,11 +254,15 @@ pub fn list_project_files(root: &Path) -> Vec<String> {
             if rules.is_ignored(&rel, is_dir) {
                 continue;
             }
+            children.push((entry.path(), rel, is_dir));
+        }
+        children.sort_by(|a, b| a.1.cmp(&b.1));
+        for (path, rel, is_dir) in children {
             if is_dir {
-                queue.push((entry.path(), rel));
+                queue.push_back((path, rel));
             } else {
                 out.push(rel);
-                if out.len() >= MAX_INDEXED_FILES {
+                if out.len() >= cap {
                     break;
                 }
             }
@@ -335,6 +360,39 @@ mod tests {
         assert!(!files.contains(&"secret.txt".to_string()));
         // Ignored by the default skip set (target/).
         assert!(!files.iter().any(|f| f.starts_with("target/")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_is_deterministic_and_cap_drops_deepest_first() {
+        // A tree with many SHALLOW (root-level) files plus one DEEP file. With the
+        // deterministic BFS, the shallow files are visited first, so a small cap
+        // drops the deep file — never a near-root source the user is likely to `@`.
+        let dir = std::env::temp_dir().join(format!("tui_v4_bfs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("deep/a/b/c")).unwrap();
+        for i in 0..8 {
+            std::fs::write(dir.join(format!("root_{i:02}.rs")), "x").unwrap();
+        }
+        std::fs::write(dir.join("deep/a/b/c/leaf.rs"), "deep").unwrap();
+
+        // Determinism: two independent builds yield byte-identical ordering.
+        let a = list_project_files(&dir);
+        let b = list_project_files(&dir);
+        assert_eq!(a, b, "BFS walk order must be deterministic across builds");
+
+        // A known shallow file is always present under the cap; cap < shallow count
+        // drops the DEEP leaf, not the shallow roots.
+        let capped = walk_with_cap(&dir, 5);
+        assert_eq!(capped.len(), 5);
+        assert!(capped.contains(&"root_00.rs".to_string()), "shallow file kept under cap");
+        assert!(
+            !capped.iter().any(|f| f.contains("leaf.rs")),
+            "deepest file dropped first under the cap, not a shallow one"
+        );
+        // Two capped builds are also identical (cap doesn't introduce nondeterminism).
+        assert_eq!(walk_with_cap(&dir, 5), capped);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

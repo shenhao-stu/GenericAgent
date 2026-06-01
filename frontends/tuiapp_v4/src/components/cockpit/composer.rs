@@ -16,15 +16,29 @@ use crate::theme::{lighten, FxCommand, Theme, Token};
 /// border tints HOT-PINK (AutoAccept coral token) in shell mode (`!cmd`).
 pub(crate) fn render_composer(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
     let shell = app.composer.is_shell_mode();
-    // Shell mode → hot-pink border + mark; else the normal border / claude mark.
+    // The orchestration command (if any) the buffer leads with — it tints the base
+    // border + mark to the command's accent, exactly like shell `!` does its hot-pink.
+    let fx_cmd = if shell { None } else { crate::components::text::fx_command(app.composer.text()) };
+    // Border/mark token: shell `!` → hot-pink; a `/goal …/hive …/conductor …/morphling`
+    // command → its accent (the SAME source `FxCommand::border` uses), so the restyle is
+    // VISIBLE at every capability level (mono/NO_COLOR included), with the truecolor
+    // `draw_composer_border_fx` overlay layering on top when enabled; else normal/dim.
     let border_tok = if shell {
         Token::ShellAccent
+    } else if let Some(cmd) = fx_cmd {
+        command_accent(cmd)
     } else if app.busy {
         Token::Dim
     } else {
         Token::Border
     };
-    let mark_tok = if shell { Token::ShellAccent } else { Token::Claude };
+    let mark_tok = if shell {
+        Token::ShellAccent
+    } else if let Some(cmd) = fx_cmd {
+        command_accent(cmd)
+    } else {
+        Token::Claude
+    };
     // Rounded corners to match the modern CC/Codex composer aesthetic
     // (clip_20260531_160036). When the flowing-rainbow border is active (the
     // /hive…/morphling gate) the effects painter overwrites these corner cells
@@ -195,16 +209,24 @@ fn command_token(row: &str) -> &str {
     &row[..end]
 }
 
+/// The semantic accent [`Token`] for an orchestration command — the SINGLE source
+/// the base composer border, the mark, and the per-char word effect all share (the
+/// same tokens `FxCommand::border` paints): Hive→Success, Conductor→Suggestion,
+/// Goal/Morphling→Claude. PURE.
+fn command_accent(cmd: FxCommand) -> Token {
+    match cmd {
+        FxCommand::Hive => Token::Success,
+        FxCommand::Conductor => Token::Suggestion,
+        FxCommand::Goal | FxCommand::Morphling => Token::Claude,
+    }
+}
+
 /// Style each char of the leading command word per its [`FxCommand`] identity
 /// (Q11c): Morphling marches the hue through the theme rainbow, Hive paints a swarm
 /// of mint shades, Goal/Conductor sweep a sheen across the word. `phase` is the pure
 /// effects clock (no `Instant::now`) so the sweep advances frame-to-frame. PURE.
 fn command_word_spans(word: &str, cmd: FxCommand, theme: &Theme, phase: f32) -> Vec<Span<'static>> {
-    let base = match cmd {
-        FxCommand::Hive => Token::Success,
-        FxCommand::Conductor => Token::Suggestion,
-        _ => Token::Claude,
-    };
+    let base = command_accent(cmd);
     let n = word.chars().count().max(1);
     word.char_indices()
         .map(|(i, ch)| {

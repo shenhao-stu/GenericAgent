@@ -209,8 +209,12 @@ impl EffectPalette {
 // Effect mode & engine
 // ---------------------------------------------------------------------------
 
-/// The user-selectable effects mode (`/effects [demo|off|subtle|full]`).
+/// The effects mode. The `/effects` command that let users pick `subtle|full` was
+/// removed in Slice 7; the ENGINE keeps these modes (the separator shimmer + border FX
+/// branch on them, and the mode stays programmatically settable), so `Subtle`/`Full`
+/// are intentionally retained even though only `Off` is constructed by default now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // Subtle/Full: retained engine modes; default is Off (Slice 7).
 pub enum EffectMode {
     /// Everything off (default). Only the static rainbow separator may show.
     #[default]
@@ -223,8 +227,9 @@ pub enum EffectMode {
 }
 
 impl EffectMode {
-    /// Parse the persistent `/effects` argument (`demo` is handled separately as a
-    /// transient splash, so it is NOT one of these).
+    /// Parse a persistent effects-mode token. The `/effects` command (its only non-test
+    /// caller) was removed in Slice 7; kept for the retained engine + tests.
+    #[allow(dead_code)]
     pub fn parse(s: &str) -> Option<EffectMode> {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" | "" => Some(EffectMode::Off),
@@ -234,6 +239,9 @@ impl EffectMode {
         }
     }
 
+    /// The mode's persistent label. The `/effects` command (its only caller) was
+    /// removed in Slice 7; kept for the retained engine + tests.
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             EffectMode::Off => "off",

@@ -20,11 +20,13 @@ use ratatui::Terminal;
 pub fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // Alt-screen (own the scroll region, P1). Mouse capture starts OFF so the
-    // terminal owns drag-select for native inline copy (Q2); wheel-scroll is the
-    // opt-in (`Ctrl+Shift+M` flips capture ON). `AppState::new()` defaults
-    // `mouse_capture=false` to match this — the field is the single source of truth.
-    execute!(stdout, EnterAlternateScreen)?;
+    // Alt-screen (own the scroll region, P1) + mouse capture ON by default. Capture
+    // is what makes crossterm deliver `ScrollUp/ScrollDown`, so the WHEEL only scrolls
+    // when it is on (Slice 0 root cause). `Ctrl+Shift+M` / `/mouse` flips it OFF so the
+    // terminal regains native drag-select for inline copy (Q2) — then use `Shift+drag`
+    // to select while capture is on. `AppState::default()` defaults `mouse_capture=true`
+    // to match this; the field is the single source of truth.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -57,10 +59,11 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Toggle terminal mouse capture at runtime (Ctrl+Shift+M / `/mouse`). ON = wheel
-/// scroll + click-to-dashboard; OFF lets the terminal's OWN drag-select work so
-/// the user can select + copy transcript/input text natively (the portable,
-/// Windows-safe answer to inline copy — Codex's model). Best-effort.
+/// Toggle terminal mouse capture at runtime (Ctrl+Shift+M / `/mouse`). ON (the
+/// default) = wheel scroll + click-to-dashboard, with `Shift+drag` to select; OFF
+/// lets the terminal's OWN drag-select work so the user can select + copy
+/// transcript/input text natively (the portable, Windows-safe answer to inline
+/// copy — Codex's model). Best-effort.
 pub fn set_mouse_capture(on: bool) {
     let mut out = io::stdout();
     let _ = if on {

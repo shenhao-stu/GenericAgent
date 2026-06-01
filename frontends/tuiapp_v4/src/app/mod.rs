@@ -36,12 +36,15 @@ use crate::util::osc::TabStatus;
 pub const TICK_DT: f32 = 0.1;
 
 /// How long a memoized `@`-picker file-index snapshot stays fresh before
-/// [`AppState::list_project_files`] re-walks the repo tree (Q12 @ speed). 5s is a
+/// [`AppState::list_project_files`] re-walks the repo tree (Q12 @ speed). 30s is a
 /// coarse debounce (CC-style, not an async actor): fluid enough that typing in the
 /// picker never pays a walk, yet short enough that a newly-created file is
-/// `@`-completable within a few seconds. The walk is bounded by `MAX_INDEXED_FILES`
-/// either way; the TTL just collapses the 3×/frame re-walk into ≤1 walk per window.
-const FILE_INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+/// `@`-completable within a session. Raised from 5s to amortize the now-deeper
+/// `MAX_INDEXED_FILES`=20000 BFS so the first keystroke after the window lapses
+/// doesn't pay a big synchronous walk on the render thread. The walk is bounded by
+/// `MAX_INDEXED_FILES` either way; the TTL just collapses the 3×/frame re-walk into
+/// ≤1 walk per window.
+const FILE_INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 
 /// The whole application state for the Foundation slice.
@@ -49,8 +52,16 @@ const FILE_INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 pub struct AppState {
     /// Real connection status (drives the status line, N1).
     pub conn: ConnStatus,
-    /// Current model name (from `Ready`/`Status`).
+    /// Current model name (from `Ready`/`Status`). Legacy full SessionType/chain
+    /// string; kept for the `llm_channel`/`truncate_model` fallback path.
     pub model: Option<String>,
+    /// Active LLM config name on the wire (`Ready`/`Status` `llm`, e.g. `codex-pro`).
+    /// `None` on a stale bridge that only sends `model` — the header falls back.
+    pub llm_name: Option<String>,
+    /// Real underlying model on the wire (`Ready`/`Status` `model_real`, e.g.
+    /// `gpt-5.5`), `[...]` tag already stripped by the bridge. Updates on a mid-turn
+    /// failover (Status re-emits both).
+    pub model_real: Option<String>,
     /// The logical transcript (oldest → newest).
     pub transcript: Vec<Block>,
     /// The multi-line composer (buffer + cursor + selection + undo/redo + magic
@@ -60,7 +71,8 @@ pub struct AppState {
     pub spinner_tick: u64,
     /// The active spinner aesthetic (N4 default = arc).
     pub spinner_style: SpinnerStyle,
-    /// The active pet-face style (§9 "soul"; switched via the `/emoji` picker).
+    /// The active pet-face style (§9 "soul"; switched via the `/pets` picker). Drives
+    /// the tab-title face; defaults to Bear (Slice 6) so the tab is bear out of the box.
     pub pet_style: PetStyle,
     /// The reasoning-effort level last applied via `/effort` (redesign_cc.md §3).
     /// `None` until the user sets one (the backend keeps its own default); once set
@@ -229,6 +241,8 @@ impl Default for AppState {
         AppState {
             conn: ConnStatus::Connecting,
             model: None,
+            llm_name: None,
+            model_real: None,
             transcript: Vec::new(),
             composer: Composer::new(),
             spinner_tick: 0,
@@ -238,10 +252,12 @@ impl Default for AppState {
             fold_all: false,
             folds: std::collections::HashMap::new(),
             palette_sel: 0,
-            // Mouse capture starts OFF so the terminal owns native drag-select for
-            // inline copy (Q2 / F7); `Ctrl+Shift+M` opts INTO wheel-scroll capture.
-            // This is the single source of truth — `term::setup` no longer captures.
-            mouse_capture: false,
+            // Mouse capture starts ON so the WHEEL scrolls (crossterm only delivers
+            // ScrollUp/Down under capture — Slice 0 root cause); `Ctrl+Shift+M` /
+            // `/mouse` flips it OFF for pure native drag-select copy (Q2 / F7), and
+            // `Shift+drag` selects while it is on. This matches `term::setup` (which
+            // enables capture) — the field is the single source of truth.
+            mouse_capture: true,
             lang: Lang::default(),
             busy: false,
             turn_started_ms: 0,
@@ -316,14 +332,27 @@ impl AppState {
         if matches!(self.overlay, Some(Overlay::Effects)) && !self.effects.demo_active() {
             self.overlay = None;
         }
+        // Drive the `/continue` picker's debounced content grep: typing only applied
+        // the cheap META filter, so once the user pauses (GREP_DEBOUNCE_TICKS) the
+        // lazy ≤1 MiB head-window grep runs here, off the keystroke path.
+        if let Some(Overlay::Continue(picker)) = self.overlay.as_mut() {
+            picker.tick(self.spinner_tick, crate::components::continue_picker::read_head_window);
+        }
     }
 
-    /// Apply an effects mode change (used by the `/effects` command + tests).
+    /// Apply an effects mode change. The `/effects` COMMAND was removed (Slice 7); the
+    /// effects ENGINE + this setter are kept so the separator shimmer / border FX keep
+    /// running automatically and the mode stays programmatically settable.
+    #[allow(dead_code)]
     pub fn set_effects_mode(&mut self, mode: EffectMode) {
         self.effects.set_mode(mode);
     }
 
-    /// Start the `/effects demo` splash: arm the demo timer + open the splash overlay.
+    /// Start the effects-demo splash: arm the demo timer + open the splash overlay. The
+    /// `/effects demo` command was removed (Slice 7); the splash machinery is retained
+    /// (it is the sole constructor of `Overlay::Effects`, whose render/input/tick arms
+    /// stay live for any future trigger).
+    #[allow(dead_code)]
     pub fn start_effects_demo(&mut self) {
         self.effects.start_demo();
         self.overlay = Some(Overlay::Effects);
@@ -422,14 +451,23 @@ impl AppState {
         }
     }
 
-    /// The OSC0 terminal title — Q9: it leads with the BEAR kaomoji `ʕ•ᴥ•ʔ` in
-    /// BOTH states (the tab "defaults to bear"). The bear is the constant tab
-    /// identity; busy vs idle is conveyed by the OSC tab-STATUS channel
-    /// (`tab_status`), not by swapping the title's leading glyph.
+    /// The OSC0 terminal title (Slice 6): `<pet-face> <session_name> · GenericAgent`.
+    /// The face is the ACTIVE pet style's heat-aware representative face (frame 0);
+    /// when the pet is `Off` it falls back to the bear constant so the tab keeps the
+    /// bear identity the spec wants in every state. busy vs idle is conveyed by the
+    /// OSC tab-STATUS channel (`tab_status`), not by swapping the title. A nameless
+    /// active session degrades to just `GenericAgent` (no bare `· GenericAgent`).
     pub fn terminal_title(&self) -> String {
-        let model = self.model.as_deref().unwrap_or("");
-        let bear = crate::flavor::PETS_BEAR[0][0]; // "ʕ•ᴥ•ʔ"
-        format!("{bear} GenericAgent · {model}")
+        let face = match crate::flavor::pet_face(self.pet_style, self.turn_elapsed_ms(0), 0) {
+            "" => crate::flavor::PETS_BEAR[0][0], // pet Off → keep the bear identity.
+            f => f,
+        };
+        let name = self.sessions.active_name();
+        if name.is_empty() {
+            format!("{face} GenericAgent")
+        } else {
+            format!("{face} {name} · GenericAgent")
+        }
     }
 
     /// Append a tool-call line to the `/verbose` audit trail (called when a tool

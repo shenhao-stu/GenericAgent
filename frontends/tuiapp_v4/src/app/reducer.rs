@@ -25,7 +25,7 @@ use crate::bridge::BridgeEvent;
 /// before the dedup (so the fold is behavior-identical for both). `now_ms` is
 /// the caller's injected monotonic clock (keeps the fold pure/testable).
 pub(in crate::app) trait FrameSink {
-    fn on_ready(&mut self, model: Option<String>);
+    fn on_ready(&mut self, model: Option<String>, llm: Option<String>, model_real: Option<String>);
     fn on_message_begin(&mut self, mid: String, role: String, now_ms: u64);
     fn on_message_delta(&mut self, mid: String, text: String);
     fn on_message_end(&mut self, mid: String, now_ms: u64);
@@ -34,6 +34,8 @@ pub(in crate::app) trait FrameSink {
     fn on_status(
         &mut self,
         model: Option<String>,
+        llm: Option<String>,
+        model_real: Option<String>,
         context_percent: Option<f64>,
         tokens: Option<u64>,
         input_tokens: Option<u64>,
@@ -52,7 +54,7 @@ pub(in crate::app) trait FrameSink {
 /// `Pong` is liveness only — no state change for either sink.
 pub(in crate::app) fn apply_frame<S: FrameSink>(sink: &mut S, frame: CoreToUi, now_ms: u64) {
     match frame {
-        CoreToUi::Ready { model, .. } => sink.on_ready(model),
+        CoreToUi::Ready { model, llm, model_real, .. } => sink.on_ready(model, llm, model_real),
         CoreToUi::MessageBegin { mid, role } => sink.on_message_begin(mid, role, now_ms),
         CoreToUi::MessageDelta { mid, text } => sink.on_message_delta(mid, text),
         CoreToUi::MessageEnd { mid, .. } => sink.on_message_end(mid, now_ms),
@@ -61,6 +63,8 @@ pub(in crate::app) fn apply_frame<S: FrameSink>(sink: &mut S, frame: CoreToUi, n
         }
         CoreToUi::Status {
             model,
+            llm,
+            model_real,
             context_percent,
             tokens,
             input_tokens,
@@ -71,6 +75,8 @@ pub(in crate::app) fn apply_frame<S: FrameSink>(sink: &mut S, frame: CoreToUi, n
             ..
         } => sink.on_status(
             model,
+            llm,
+            model_real,
             context_percent,
             tokens,
             input_tokens,
@@ -123,6 +129,18 @@ impl AppState {
         }
     }
 
+    /// Store the wire model identity (`llm` + `model_real`), shared by `Ready` and
+    /// `Status` so a mid-turn failover live-updates the header. Only overwrites a
+    /// field when the frame carried it (a stale bridge omitting them keeps the prior).
+    fn store_identity(&mut self, llm: Option<String>, model_real: Option<String>) {
+        if llm.is_some() {
+            self.llm_name = llm;
+        }
+        if model_real.is_some() {
+            self.model_real = model_real;
+        }
+    }
+
     /// Find the (in-flight) block for a given mid, newest first.
     fn block_for_mid_mut(&mut self, mid: &str) -> Option<&mut Block> {
         self.transcript
@@ -133,9 +151,10 @@ impl AppState {
 }
 
 impl FrameSink for AppState {
-    fn on_ready(&mut self, model: Option<String>) {
+    fn on_ready(&mut self, model: Option<String>, llm: Option<String>, model_real: Option<String>) {
         self.model = model.clone();
         self.conn = ConnStatus::Connected { model };
+        self.store_identity(llm, model_real);
     }
 
     fn on_message_begin(&mut self, mid: String, role: String, now_ms: u64) {
@@ -216,6 +235,8 @@ impl FrameSink for AppState {
     fn on_status(
         &mut self,
         model: Option<String>,
+        llm: Option<String>,
+        model_real: Option<String>,
         context_percent: Option<f64>,
         tokens: Option<u64>,
         input_tokens: Option<u64>,
@@ -230,6 +251,8 @@ impl FrameSink for AppState {
                 *cm = Some(m);
             }
         }
+        // A mid-turn failover re-emits Status with a NEW active member — live-update.
+        self.store_identity(llm, model_real);
         if let Some(p) = context_percent {
             self.context_percent = Some(p);
             self.cost.context_percent = Some(p);
@@ -295,7 +318,7 @@ impl FrameSink for AppState {
 }
 
 impl FrameSink for Session {
-    fn on_ready(&mut self, model: Option<String>) {
+    fn on_ready(&mut self, model: Option<String>, _llm: Option<String>, _model_real: Option<String>) {
         self.model = model.clone();
         self.conn = ConnStatus::Connected { model };
     }
@@ -344,7 +367,9 @@ impl FrameSink for Session {
     fn on_status(
         &mut self,
         model: Option<String>,
-        _context_percent: Option<f64>,
+        _llm: Option<String>,
+        _model_real: Option<String>,
+        context_percent: Option<f64>,
         _tokens: Option<u64>,
         _input_tokens: Option<u64>,
         _output_tokens: Option<u64>,
@@ -357,6 +382,11 @@ impl FrameSink for Session {
             if let ConnStatus::Connected { model: cm } = &mut self.conn {
                 *cm = Some(m);
             }
+        }
+        // Store ctx per-session (mirrors the active reducer) so a session promoted
+        // to active carries its fill percent instead of a blank `ctx —` (Slice 4).
+        if let Some(p) = context_percent {
+            self.context_percent = Some(p);
         }
     }
 
@@ -372,5 +402,40 @@ impl FrameSink for Session {
             self.conn = ConnStatus::Disconnected { reason: message };
             self.busy = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::session::Session;
+
+    /// Slice 4 ctx-blank root-cause: the BACKGROUND `on_status` reducer now STORES
+    /// `context_percent` (it used to ignore it as `_context_percent`), so a session
+    /// whose status folds through the background sink carries its fill percent
+    /// instead of leaving the footer at a blank `ctx —` after promotion.
+    #[test]
+    fn background_on_status_stores_context_percent() {
+        let mut s = Session::new(1, "bg");
+        assert_eq!(s.context_percent, None, "no ctx before any status");
+        apply_frame(
+            &mut s,
+            CoreToUi::Status {
+                model: Some("glm".into()),
+                llm: None,
+                model_real: None,
+                context_percent: Some(48.0),
+                tokens: Some(100),
+                input_tokens: Some(60),
+                output_tokens: Some(40),
+                cache_tokens: None,
+                last_input: Some(60),
+                last_output: Some(40),
+                text: None,
+            },
+            0,
+        );
+        assert_eq!(s.context_percent, Some(48.0), "background on_status stores ctx");
+        assert_eq!(s.model.as_deref(), Some("glm"), "model still tracked too");
     }
 }

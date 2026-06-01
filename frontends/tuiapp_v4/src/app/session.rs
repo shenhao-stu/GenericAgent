@@ -114,6 +114,9 @@ pub struct Session {
     /// This session's model name (per-session; never a global field, so two
     /// children can't clobber each other's footer model — Ink no-cross-talk rule).
     pub model: Option<String>,
+    /// This session's last-known context fill percent (per-session, like `model`);
+    /// stored by the background `on_status` so it survives promotion to active.
+    pub context_percent: Option<f64>,
     /// Whether a turn is in flight for THIS session.
     pub busy: bool,
     /// Monotonic ms when the current turn began (heat clock for the running row).
@@ -143,6 +146,7 @@ impl Session {
             transcript: Vec::new(),
             conn: ConnStatus::Connecting,
             model: None,
+            context_percent: None,
             busy: false,
             busy_since_ms: 0,
             pending_ask: None,
@@ -732,10 +736,11 @@ pub fn status_glyph(status: SessionStatus, elapsed_ms: u64) -> (&'static str, To
 /// that the bridge stream appends to, so a running row's preview updates per delta.
 pub fn preview_line(transcript: &[Block], status: SessionStatus) -> String {
     // Most recent assistant/system block → its LAST non-blank line (the "current
-    // output" tail, like CC's running-row preview).
+    // output" tail, like CC's running-row preview). A `Turn N ...` marker is spacing,
+    // not content (Slice 0 / R3 companion), so skip it when picking the tail.
     for b in transcript.iter().rev() {
         if matches!(b.role, Role::Assistant | Role::System) {
-            if let Some(line) = last_non_blank_line(&b.source) {
+            if let Some(line) = last_non_blank_content_line(&b.source) {
                 return collapse_ws(line);
             }
         }
@@ -756,9 +761,15 @@ pub fn preview_line(transcript: &[Block], status: SessionStatus) -> String {
     }
 }
 
-/// The last non-blank line of `s` (for a running/finished reply preview). PURE.
-fn last_non_blank_line(s: &str) -> Option<&str> {
-    s.lines().rev().map(str::trim).find(|l| !l.is_empty())
+/// The last non-blank, non-turn-marker line of `s` (for a running/finished reply
+/// preview). A `Turn N ...` line is turn spacing, never content, so it is skipped —
+/// otherwise a session whose newest output is a bare marker shows `Turn N ...` on its
+/// dashboard card (the R3 raw-source preview leak). PURE.
+fn last_non_blank_content_line(s: &str) -> Option<&str> {
+    s.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && crate::render::chip::find_turn_line(l) != Some(0))
 }
 
 /// The first non-blank line of `s` (for a user-message preview). PURE.
@@ -1136,7 +1147,7 @@ mod tests {
         assert_eq!(b.transcript.len(), 0);
 
         // Per-session model: a Ready on b sets only b's model.
-        b.apply_frame(CoreToUi::Ready { version: None, model: Some("glm-b".into()) }, 0);
+        b.apply_frame(CoreToUi::Ready { version: None, model: Some("glm-b".into()), llm: None, model_real: None }, 0);
         assert_eq!(b.model.as_deref(), Some("glm-b"));
         assert_eq!(a.model, None);
     }

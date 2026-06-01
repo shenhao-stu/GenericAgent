@@ -542,11 +542,12 @@ mod tests {
         assert_eq!(label, i18n::t(app.lang, "copy.label.reply"));
     }
 
-    /// Q2 / F7 — mouse capture starts OFF so the terminal owns native drag-select
-    /// for inline copy; the field is the single source of truth that `term::setup`
-    /// (no longer captures) and the `Ctrl+Shift+M` toggle both agree with.
+    /// Slice 0 — mouse capture starts ON so crossterm delivers `ScrollUp/ScrollDown`
+    /// and the WHEEL scrolls (the real "can't scroll" fix). The field is the single
+    /// source of truth that `term::setup` (which enables capture) and the
+    /// `Ctrl+Shift+M` opt-OUT toggle both agree with; `Shift+drag` selects while on.
     #[test]
-    fn mouse_capture_defaults_off() {
-        assert!(!AppState::new().mouse_capture, "mouse capture defaults OFF (native select)");
+    fn mouse_capture_defaults_on() {
+        assert!(AppState::new().mouse_capture, "mouse capture defaults ON so the wheel scrolls");
     }
 }

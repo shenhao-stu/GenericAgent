@@ -48,16 +48,17 @@ pub(crate) fn emit_code_block(theme: &Theme, code: &CodeBuf) -> Vec<Line<'static
     out
 }
 
-/// The (color token, leading glyph) for a heading level. A restrained ramp — no
-/// ASCII banners, matching CC's understated style.
-pub(crate) fn heading_style(level: HeadingLevel) -> (Token, &'static str) {
+/// The color token for a heading level — a restrained level cue (accent for H1,
+/// dimming toward H6), like tui_v3/CC. No literal `#` glyph: the heading renders
+/// as clean BOLD + colored text.
+pub(crate) fn heading_style(level: HeadingLevel) -> Token {
     match level {
-        HeadingLevel::H1 => (Token::Claude, "# "),
-        HeadingLevel::H2 => (Token::Suggestion, "## "),
-        HeadingLevel::H3 => (Token::Success, "### "),
-        HeadingLevel::H4 => (Token::Warning, "#### "),
-        HeadingLevel::H5 => (Token::PlanMode, "##### "),
-        HeadingLevel::H6 => (Token::Dim, "###### "),
+        HeadingLevel::H1 => Token::Claude,
+        HeadingLevel::H2 => Token::Suggestion,
+        HeadingLevel::H3 => Token::Success,
+        HeadingLevel::H4 => Token::Warning,
+        HeadingLevel::H5 => Token::PlanMode,
+        HeadingLevel::H6 => Token::Dim,
     }
 }
 

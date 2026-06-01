@@ -39,7 +39,7 @@ use app_event::AppEvent;
 use bridge::{BridgeEvent, BridgeOptions};
 use theme::Theme;
 
-const VERSION: &str = "0.3.0";
+const VERSION: &str = "0.4.0";
 
 /// The full terminal area (origin `(0,0)`, current size) — what `frame.area()`
 /// reports for a fullscreen viewport. Read BEFORE `terminal.draw` so the loop can
@@ -219,6 +219,8 @@ fn run_dump_frame(scenario: &str) -> Result<()> {
     app.apply_bridge_event(
         BridgeEvent::Frame(bridge::protocol::CoreToUi::Status {
             model: None,
+            llm: Some("codex-pro".into()),
+            model_real: Some("gpt-5.5".into()),
             context_percent: Some(48.0),
             tokens: Some(1574),
             input_tokens: Some(1234),

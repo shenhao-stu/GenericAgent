@@ -310,13 +310,9 @@ impl<'t> Walker<'t> {
             }
             Tag::Heading { level, .. } => {
                 self.block_gap();
-                let (tok, prefix) = code::heading_style(level);
-                self.cur.push(Span::styled(
-                    prefix.to_string(),
-                    Style::default()
-                        .fg(self.theme.color(tok))
-                        .add_modifier(Modifier::BOLD),
-                ));
+                // Render the heading as clean BOLD + colored text (no literal `#`
+                // glyph) — the per-level color is the restrained level cue.
+                let tok = code::heading_style(level);
                 self.style_stack.push(
                     Style::default()
                         .fg(self.theme.color(tok))

@@ -20,6 +20,8 @@ fn ready_marks_connected_with_model() {
         frame(CoreToUi::Ready {
             version: Some("1".into()),
             model: Some("glm-4".into()),
+            llm: None,
+            model_real: None,
         }),
         0,
     );
@@ -31,6 +33,78 @@ fn ready_marks_connected_with_model() {
     );
     assert_eq!(app.model.as_deref(), Some("glm-4"));
     assert_eq!(app.conn.label(), "connected glm-4");
+}
+
+/// Slice-1 honest check: the wire model IDENTITY (`llm` + `model_real`) lands on
+/// `AppState`, and a mid-turn FAILOVER `Status` live-updates both. The `[1m]` tag is
+/// stripped by the bridge (`ga_bridge.llm_identity`, asserted separately in Python),
+/// so the wire carries the already-stripped `claude-opus-4-8` — this confirms the
+/// Rust side stores it through the real `apply_bridge_event` fold (not a fixture),
+/// keeps `model` (the legacy chain) untouched, and that an identity-less `Status`
+/// does NOT clobber a prior value.
+#[test]
+fn ready_then_failover_status_updates_llm_identity() {
+    let mut app = AppState::new();
+
+    // Handshake: codex-pro / gpt-5.5 — the legacy `model` chain stays distinct.
+    app.apply_bridge_event(
+        frame(CoreToUi::Ready {
+            version: Some("1".into()),
+            model: Some("MixinSession/codex-pro|getoken_20x".into()),
+            llm: Some("codex-pro".into()),
+            model_real: Some("gpt-5.5".into()),
+        }),
+        0,
+    );
+    assert_eq!(app.llm_name.as_deref(), Some("codex-pro"));
+    assert_eq!(app.model_real.as_deref(), Some("gpt-5.5"));
+    assert_eq!(app.model.as_deref(), Some("MixinSession/codex-pro|getoken_20x"));
+
+    // Mid-turn failover → a fresh Status flips the ACTIVE member to getoken_20x. The
+    // bridge already stripped `claude-opus-4-8[1m]` → `claude-opus-4-8` (no `[`).
+    app.apply_bridge_event(
+        frame(CoreToUi::Status {
+            model: Some("MixinSession/codex-pro|getoken_20x".into()),
+            llm: Some("getoken_20x".into()),
+            model_real: Some("claude-opus-4-8".into()),
+            context_percent: None,
+            tokens: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_tokens: None,
+            last_input: None,
+            last_output: None,
+            text: None,
+        }),
+        1_000,
+    );
+    assert_eq!(app.llm_name.as_deref(), Some("getoken_20x"));
+    assert_eq!(app.model_real.as_deref(), Some("claude-opus-4-8"));
+    assert!(
+        !app.model_real.as_deref().unwrap().contains('['),
+        "the [1m] context-window tag must be stripped on the wire"
+    );
+
+    // An identity-LESS Status (a stale/older bridge frame) must NOT wipe the prior
+    // identity — only a present field overwrites (store_identity guard).
+    app.apply_bridge_event(
+        frame(CoreToUi::Status {
+            model: None,
+            llm: None,
+            model_real: None,
+            context_percent: Some(50.0),
+            tokens: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_tokens: None,
+            last_input: None,
+            last_output: None,
+            text: None,
+        }),
+        2_000,
+    );
+    assert_eq!(app.llm_name.as_deref(), Some("getoken_20x"));
+    assert_eq!(app.model_real.as_deref(), Some("claude-opus-4-8"));
 }
 
 #[test]
@@ -167,11 +241,21 @@ fn turn_elapsed_tracks_heat_clock() {
 #[test]
 fn tab_status_and_title_track_state() {
     let mut app = AppState::new();
-    // Idle by default. Q9: the tab title leads with the BEAR `ʕ•ᴥ•ʔ` in BOTH
-    // states; "GenericAgent" is present but no longer the leading token.
+    // Idle by default. Slice 6: the title is `<pet-face> <session_name> · GenericAgent`;
+    // the pet defaults ON + bear so it leads with `ʕ•ᴥ•ʔ`, carries the active session
+    // name, ends in "GenericAgent", and never contains "NativeClaude".
     assert_eq!(app.tab_status(), TabStatus::Idle);
-    assert!(app.terminal_title().starts_with("ʕ•ᴥ•ʔ"), "bear leads when idle");
-    assert!(app.terminal_title().contains("GenericAgent"));
+    let title = app.terminal_title();
+    assert!(title.starts_with("ʕ•ᴥ•ʔ"), "bear face leads when idle: {title:?}");
+    assert!(title.contains(app.sessions.active_name()), "the active session name is in the title: {title:?}");
+    assert!(title.contains("GenericAgent"), "GenericAgent is in the title: {title:?}");
+    assert!(!title.contains("NativeClaude"), "the title must NOT contain NativeClaude: {title:?}");
+
+    // A renamed session flows into the title (set in-memory; no sidecar write here).
+    app.sessions.active_mut().name = "scan tabs".into();
+    let renamed = app.terminal_title();
+    assert!(renamed.contains("scan tabs"), "the renamed session shows in the title: {renamed:?}");
+    assert_eq!(renamed, "ʕ•ᴥ•ʔ scan tabs · GenericAgent");
 
     // Busy → Working. The bear STILL leads (busy/idle is carried by the OSC
     // tab-status channel, not by swapping the title's leading glyph).
@@ -743,10 +827,10 @@ fn click_on_fold_triangle_resolves_and_toggles_node() {
 }
 
 /// End-to-end expandable TOOL result (Fix E): a single-turn block with a long
-/// `🛠️ name(args)` result renders a `⏺` bullet whose result is truncated + a `▸ +N
-/// more` clickable affordance; the bullet is a `Tool` node in the hit table. Clicking
-/// it expands the result (every line shows) and swaps `▸` for `▾` — and the click
-/// re-anchors so it never jumps. A second click collapses it back.
+/// `🛠️ name(args)` result renders a bordered BOX whose result is truncated + a
+/// `… +N more` fold affordance INSIDE the box; the box is a `Tool` node in the hit
+/// table. Clicking it expands the result (every line shows) and swaps `… +N more` for
+/// `▾` — and the click re-anchors so it never jumps. A second click collapses it back.
 #[test]
 fn click_expands_and_collapses_tool_result() {
     let theme = Theme::default_theme();
@@ -757,19 +841,19 @@ fn click_expands_and_collapses_tool_result() {
     app.transcript.push(Block::new(id, None, Role::Assistant, src.to_string(), true));
     app.sync_transcript(80, 40, &theme);
 
-    // Collapsed: the bullet shows, the result is truncated to 4 rows + a `▸ +2 more`
-    // affordance, and LINE6 (past the preview) is hidden.
+    // Collapsed: the box shows (name on the top border), the result is truncated to
+    // 4 rows + a `… +2 more` affordance, and LINE6 (past the preview) is hidden.
     let before = block_plain(&app, id, &theme);
-    assert!(before.contains("⏺ run"), "the tool bullet renders: {before:?}");
-    assert!(before.contains("▸ +2 more"), "collapsed result has a clickable triangle: {before:?}");
+    assert!(before.contains("╭─"), "the tool box renders: {before:?}");
+    assert!(before.lines().any(|l| l.contains("╭─") && l.contains("run")), "tool name on the top border: {before:?}");
+    assert!(before.contains("… +2 more"), "collapsed result has the fold affordance: {before:?}");
     assert!(!before.contains("LINE6"), "the overflow line is hidden when collapsed: {before:?}");
-    assert!(!before.contains("more more"), "no dead `… +N more` duplication");
 
-    // The bullet is a `Tool` node in the hit table.
+    // The box is a `Tool` node in the hit table.
     let tool = NodeId::Tool { block: id, tool: 0 };
     assert!(
         app.node_hit.iter().any(|(_, n)| *n == tool),
-        "the expandable tool bullet is a clickable node: {:?}",
+        "the expandable tool box is a clickable node: {:?}",
         app.node_hit
     );
 
@@ -781,14 +865,14 @@ fn click_expands_and_collapses_tool_result() {
     for i in 1..=6 {
         assert!(expanded.contains(&format!("LINE{i}")), "expanded result shows LINE{i}: {expanded:?}");
     }
-    assert!(expanded.contains('▾'), "expanded result has a ▾ collapse triangle: {expanded:?}");
+    assert!(expanded.contains('▾'), "expanded result has a ▾ collapse affordance: {expanded:?}");
     assert!(!expanded.contains("+2 more"), "no `+N more` text when expanded: {expanded:?}");
 
     // Toggle back → collapsed again (clean round-trip).
     app.toggle_fold(tool);
     app.sync_transcript(80, 40, &theme);
     let recollapsed = block_plain(&app, id, &theme);
-    assert!(recollapsed.contains("▸ +2 more"), "second toggle re-collapses: {recollapsed:?}");
+    assert!(recollapsed.contains("… +2 more"), "second toggle re-collapses: {recollapsed:?}");
     assert!(!recollapsed.contains("LINE6"), "overflow hidden again: {recollapsed:?}");
 }
 
@@ -903,4 +987,499 @@ fn file_index_walks_once_within_ttl() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ===========================================================================
+// ROUND-4 FAILURE DIAGNOSIS — end-to-end tests that exercise the REAL render
+// pipeline (apply_bridge_event → prepare_frame → render to TestBackend → scan
+// the STYLED frame buffer), the path the prior round's unit-on-clean-fixtures
+// tests bypassed.
+// ===========================================================================
+
+/// Render the whole cockpit to an in-memory TestBackend and return its rows as
+/// trailing-trimmed strings — the exact bytes the terminal would show.
+fn render_to_rows(app: &mut AppState, w: u16, h: u16) -> Vec<String> {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    let theme = app.theme.clone();
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    app.prepare_frame(Rect::new(0, 0, w, h), &theme);
+    term.draw(|f| crate::components::render(f, app, &theme, 0)).unwrap();
+    let buf = term.backend().buffer();
+    let mut rows = Vec::with_capacity(h as usize);
+    for y in 0..h as usize {
+        let mut line = String::new();
+        for x in 0..w as usize {
+            line.push_str(buf.content()[y * w as usize + x].symbol());
+        }
+        rows.push(line.trim_end().to_string());
+    }
+    rows
+}
+
+/// FAILURE C (Turn N leak) — driven through the REAL streaming pipeline + the
+/// STYLED frame. A single `Turn N ...` marker preceded by a prose line leaks
+/// the literal marker because `fold_turns_with` returns the WHOLE text as one
+/// `Text` segment (<2 markers) and `strip_leading_turn_line` only de-marks line
+/// 0 (the prose), so the mid-body marker flows through markdown as prose. The
+/// `no_turn_n_anywhere` fixture never has a marker preceded by non-marker text.
+#[test]
+fn live_active_turn_marker_leaks_into_styled_frame() {
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+    app.push_user("hi".into());
+    // Begin a turn, then stream a delta whose body has prose BEFORE the marker —
+    // the canonical GA reply shape ("preamble … Turn N … body").
+    app.apply_bridge_event(frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }), 0);
+    app.apply_bridge_event(
+        frame(CoreToUi::MessageDelta {
+            mid: "m1".into(),
+            text: "Let me look into this.\nTurn 1 ...\nthe answer is 42".into(),
+        }),
+        0,
+    );
+    let rows = render_to_rows(&mut app, 100, 24);
+    let screen = rows.join("\n");
+    assert!(
+        !screen.contains("Turn 1"),
+        "the live STYLED frame leaked a literal 'Turn 1' marker:\n{screen}"
+    );
+}
+
+/// FAILURE A (cannot scroll) — driven through the REAL loop ordering: render a
+/// frame (sync viewport to geometry), THEN press PageUp / wheel-up (the order
+/// the event loop uses), then re-render and assert the visible window MOVED off
+/// the tail. A unit test that calls `viewport.page_up` on a hand-built cache
+/// can pass while the live binary's geometry/ordering differs.
+#[test]
+fn page_up_and_wheel_move_the_live_viewport() {
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+    // A tall transcript so there is something to scroll.
+    for i in 0..60u64 {
+        app.push_system(format!("history line number {i}"));
+    }
+    // First frame: syncs the wrap cache + viewport to the transcript geometry.
+    let before = render_to_rows(&mut app, 80, 20);
+    assert!(app.following(), "starts pinned to the tail (follow mode)");
+    let tail_visible_before = before.iter().any(|r| r.contains("line number 59"));
+    assert!(tail_visible_before, "the tail line is visible before scrolling");
+
+    // PageUp (the real keymap calls app.page_up()).
+    app.page_up();
+    assert!(!app.following(), "PageUp must leave follow mode");
+    let after_pgup = render_to_rows(&mut app, 80, 20);
+    assert!(
+        !after_pgup.iter().any(|r| r.contains("line number 59")),
+        "after PageUp the tail must scroll OUT of view:\n{}",
+        after_pgup.join("\n")
+    );
+
+    // Wheel up further (the real mouse handler calls app.scroll_lines(-3)).
+    let top_after_pgup = app.viewport.visual_top(&app.wrap_cache);
+    app.scroll_lines(-3);
+    let _ = render_to_rows(&mut app, 80, 20);
+    assert!(
+        app.viewport.visual_top(&app.wrap_cache) < top_after_pgup,
+        "wheel-up must move the viewport top further toward history"
+    );
+
+    // End / scroll_end resumes follow.
+    app.scroll_end();
+    let after_end = render_to_rows(&mut app, 80, 20);
+    assert!(app.following(), "scroll_end resumes follow mode");
+    assert!(
+        after_end.iter().any(|r| r.contains("line number 59")),
+        "after End the tail is visible again"
+    );
+}
+
+/// FAILURE B (markdown not rendering live) — during streaming the assistant text
+/// must be markdown-FORMATTED in the STYLED frame, not dumped raw. We stream a
+/// real GA-shaped reply (heading + bold + inline code) and assert the raw
+/// markdown tokens (`##`, `**`, backticks) do NOT appear on screen while the
+/// formatted text DOES — proving the live/streaming tail ran the markdown
+/// renderer, not a raw-text passthrough.
+#[test]
+fn streaming_markdown_is_formatted_in_styled_frame() {
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+    app.push_user("hi".into());
+    app.apply_bridge_event(frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }), 0);
+    // A finalized-paragraph head so it commits, plus a streaming tail — both must
+    // render formatted (no raw tokens).
+    app.apply_bridge_event(
+        frame(CoreToUi::MessageDelta {
+            mid: "m1".into(),
+            text: "## Heading One\n\nThis is **bold** and `code` text.\n\nA second **strong** word.".into(),
+        }),
+        0,
+    );
+    let rows = render_to_rows(&mut app, 100, 24);
+    let screen = rows.join("\n");
+    // The words survive…
+    assert!(screen.contains("Heading One"), "heading text present:\n{screen}");
+    assert!(screen.contains("bold"), "bold word present");
+    assert!(screen.contains("code"), "code word present");
+    // …but the raw INLINE markdown punctuation does NOT (markdown actually ran).
+    // Headings now render CLEAN like tui_v3/CC: no literal `#` glyph — the heading
+    // is conveyed by BOLD + per-level color, asserted below.
+    assert!(!screen.contains("**"), "raw bold markers leaked (markdown did not run):\n{screen}");
+    assert!(!screen.contains("##"), "literal heading hashes leaked (heading not rendered clean):\n{screen}");
+
+    // Prove the heading actually ran the markdown walker: its row carries BOLD.
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use ratatui::Terminal;
+    let theme = app.theme.clone();
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    app.prepare_frame(Rect::new(0, 0, 100, 24), &theme);
+    let app_ref: &AppState = &app;
+    term.draw(|f| crate::components::render(f, app_ref, &theme, 0)).unwrap();
+    let buf = term.backend().buffer();
+    let heading_row = rows.iter().position(|r| r.contains("Heading One")).expect("heading row");
+    let bold_on_heading = (0..100usize).any(|x| {
+        buf.content()[heading_row * 100 + x].modifier.contains(Modifier::BOLD)
+    });
+    assert!(bold_on_heading, "the heading row must be BOLD (markdown ran), row {heading_row}:\n{screen}");
+}
+
+/// SLICE 10 (markdown heading cleanup) — the HONEST end-to-end check. Stream
+/// `# Title` / `## Heading One` / `### Sub` through the REAL bridge path
+/// (`apply_bridge_event`) into the STYLED `TestBackend` grid, then for EACH
+/// heading row assert it (a) contains the heading TEXT, (b) carries NO literal
+/// `#`, and (c) the text cells are BOLD + a non-body heading color — the
+/// clean tui_v3/CC look, not a raw `## ` glyph.
+#[test]
+fn headings_render_bold_and_colored_without_hashes_in_styled_frame() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Modifier};
+    use ratatui::Terminal;
+
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+    app.push_user("hi".into());
+    app.apply_bridge_event(frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }), 0);
+    app.apply_bridge_event(
+        frame(CoreToUi::MessageDelta {
+            mid: "m1".into(),
+            text: "# Title\n\n## Heading One\n\n### Sub\n\nbody text.".into(),
+        }),
+        0,
+    );
+
+    let (w, h) = (100u16, 24u16);
+    let theme = app.theme.clone();
+    let body_color = theme.color(crate::theme::Token::Text);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    app.prepare_frame(Rect::new(0, 0, w, h), &theme);
+    let app_ref: &AppState = &app;
+    term.draw(|f| crate::components::render(f, app_ref, &theme, 0)).unwrap();
+    let buf = term.backend().buffer();
+
+    let rows: Vec<String> = (0..h as usize)
+        .map(|y| (0..w as usize).map(|x| buf.content()[y * w as usize + x].symbol()).collect::<String>())
+        .collect();
+    let screen = rows.join("\n");
+
+    // No literal hash glyphs survive anywhere on screen (clean headings).
+    assert!(!screen.contains('#'), "a literal heading hash leaked:\n{screen}");
+
+    for needle in ["Title", "Heading One", "Sub"] {
+        let row = rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("heading {needle:?} present:\n{screen}"));
+        // Inspect the styled cells under the heading text on that row.
+        let line = &rows[row];
+        let start = line.find(needle).unwrap();
+        let (mut saw_bold, mut saw_color) = (false, false);
+        for x in start..(start + needle.chars().count()).min(w as usize) {
+            let cell = &buf.content()[row * w as usize + x];
+            if cell.symbol() == " " { continue; }
+            if cell.modifier.contains(Modifier::BOLD) { saw_bold = true; }
+            if cell.fg != Color::Reset && cell.fg != body_color { saw_color = true; }
+        }
+        assert!(saw_bold, "heading {needle:?} must be BOLD (row {row}):\n{screen}");
+        assert!(saw_color, "heading {needle:?} must carry a distinct heading color (row {row}):\n{screen}");
+    }
+}
+
+/// SLICE 0 (wheel scroll) — the HONEST end-to-end check for the real "can't
+/// scroll" bug. The defect was never in `scroll_lines`: it was that crossterm only
+/// delivers `ScrollUp/ScrollDown` when mouse capture is ON, and capture defaulted
+/// OFF, so the wheel was dead in the real terminal. R3's test called `scroll_lines`
+/// directly and bypassed that gate. This test (1) asserts capture defaults ON so the
+/// wheel events are actually emitted, and (2) feeds REAL crossterm `ScrollUp` /
+/// `ScrollDown` mouse events through the LIVE input router (`crate::input::mouse`),
+/// not `scroll_lines`, and asserts each moves `viewport.visual_top`.
+#[test]
+fn wheel_scroll_event_moves_viewport_under_default_capture() {
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+    // (1) Capture is ON by default — without this the terminal never sends the wheel
+    // events below, so the whole feature is dead however good `scroll_lines` is.
+    assert!(
+        AppState::default().mouse_capture,
+        "mouse capture must default ON so crossterm delivers ScrollUp/ScrollDown (the wheel)"
+    );
+
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+    for i in 0..60u64 {
+        app.push_system(format!("history line number {i}"));
+    }
+    // First frame: sync the wrap cache + viewport to the transcript geometry (the
+    // viewport now has real rows to scroll over). Starts pinned to the tail.
+    let _ = render_to_rows(&mut app, 80, 20);
+    assert!(app.following(), "starts pinned to the tail (follow mode)");
+
+    let wheel = |kind: MouseEventKind| MouseEvent {
+        kind,
+        column: 10,
+        row: 10, // inside the transcript body, not the header band
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // A wheel-UP event routed through the LIVE `mouse()` path → scroll_lines(-3) →
+    // the viewport leaves follow and the top moves toward history.
+    crate::input::mouse::mouse(wheel(MouseEventKind::ScrollUp), &mut app);
+    let _ = render_to_rows(&mut app, 80, 20);
+    assert!(!app.following(), "a wheel-up event leaves follow mode");
+    let top_after_up = app.viewport.visual_top(&app.wrap_cache);
+    assert!(top_after_up > 0, "wheel-up moved the viewport top off the tail, got {top_after_up}");
+
+    // A wheel-DOWN event (the exact crossterm `ScrollDown` the prompt names) routed
+    // through the SAME live path → scroll_lines(+3) → the top moves back toward the
+    // tail (visual_top increases). This is the assertion the prompt demands.
+    crate::input::mouse::mouse(wheel(MouseEventKind::ScrollDown), &mut app);
+    let _ = render_to_rows(&mut app, 80, 20);
+    let top_after_down = app.viewport.visual_top(&app.wrap_cache);
+    assert!(
+        top_after_down > top_after_up,
+        "a ScrollDown mouse event must advance viewport.visual_top via the live path \
+         ({top_after_up} → {top_after_down})"
+    );
+}
+
+/// SLICE 0 (dashboard companion) — `preview_line` must NOT surface a bare
+/// `Turn N ...` marker as a session card's live preview (the R3 raw-source leak).
+/// When the newest assistant output is a turn marker, the card should fall back to
+/// the prior real content line, not echo the spacing marker.
+#[test]
+fn dashboard_preview_skips_turn_marker_line() {
+    use crate::app::session::preview_line;
+    use crate::app::session::SessionStatus;
+
+    let block = Block::new(1, None, Role::Assistant, "the answer is 42\nTurn 2 ...".into(), true);
+    let preview = preview_line(std::slice::from_ref(&block), SessionStatus::Working);
+    assert_eq!(
+        preview, "the answer is 42",
+        "the dashboard preview must skip the bare 'Turn 2 ...' marker and show real content, got {preview:?}"
+    );
+}
+
+/// SLICE 3 (tool-call BORDERED BOX) — the HONEST end-to-end check. A real-GA-shaped
+/// compact call (the U+1F6E0 tool marker + `web_scan({"tabs_only": true})` + an
+/// `[Info] ok` result line) is STREAMED through the live pipeline
+/// (`apply_bridge_event` MessageBegin → MessageDelta), rendered to a TestBackend, and
+/// the STYLED cell grid is scanned for the tui_v3-style box: the `╭─` top-left corner
+/// carrying the tool NAME `web_scan` and a `·t` turn-id, the `[Info]`-derived `ok`
+/// result row INSIDE the box, and the `╯` bottom-right corner. We ALSO probe the cell
+/// FG colors to prove the border is the accent (`Token::Claude`) and the name is BOLD
+/// — i.e. the box is actually painted, not just present as text. Finally the 4 parity
+/// invariants are asserted to pass (the box rows flow through both the styled draw and
+/// the plain projection, so they stay green by construction).
+#[test]
+fn live_tool_call_renders_bordered_box_in_styled_frame() {
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+    app.push_user("scan tabs".into());
+
+    // Stream the call: U+1F6E0 (🛠) + VS16 + space marker, then the compact header
+    // and an [Info] result line — the exact shape `ga_bridge.py` emits in compact mode.
+    app.apply_bridge_event(
+        frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }),
+        0,
+    );
+    app.apply_bridge_event(
+        frame(CoreToUi::MessageDelta {
+            mid: "m1".into(),
+            text: "\u{1F6E0}\u{FE0F} web_scan({\"tabs_only\": true})\n[Info] ok".into(),
+        }),
+        0,
+    );
+
+    let rows = render_to_rows(&mut app, 100, 24);
+    let screen = rows.join("\n");
+
+    // (1) The TOOL box top border carries the tool name + a `·t` turn-id; the bottom
+    //     border closes it. Scan the STYLED symbol grid (what the terminal shows) for
+    //     the `╭─` line that bears `web_scan` (the header/composer also draw `╭─`
+    //     frames — the tool box is the one with the tool name ON it).
+    let top = rows
+        .iter()
+        .find(|r| r.contains("╭─") && r.contains("web_scan"))
+        .unwrap_or_else(|| panic!("no tool-box `╭─ web_scan` top border in the live styled frame:\n{screen}"));
+    assert!(top.contains("·t"), "a `·t` turn-id on the top border: {top:?}");
+    assert!(top.contains("✓ ok"), "the ok status badge on the top border: {top:?}");
+    assert!(
+        rows.iter().any(|r| r.contains('│') && r.contains("ok") && !r.contains("✓")),
+        "the [Info]-derived `ok` result row is INSIDE the box (│ … │):\n{screen}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains('╰') && r.contains('╯')),
+        "a `╰…╯` bottom border corner closes the box:\n{screen}"
+    );
+    // The raw tool marker never leaks into the styled frame.
+    assert!(!screen.contains('\u{1F6E0}'), "the raw U+1F6E0 tool marker must not render:\n{screen}");
+
+    // (2) Probe the cell FG to prove the box is PAINTED: the `╭` corner is the accent
+    //     (Token::Claude) and the `web_scan` name carries BOLD — i.e. the styled draw
+    //     ran `push_tool_box`, not a plain dump.
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use ratatui::Terminal;
+    let theme = app.theme.clone();
+    let accent = theme.color(crate::theme::Token::Claude);
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    app.prepare_frame(Rect::new(0, 0, 100, 24), &theme);
+    let app_ref: &AppState = &app;
+    term.draw(|f| crate::components::render(f, app_ref, &theme, 0)).unwrap();
+    let buf = term.backend().buffer();
+    let top_row = rows
+        .iter()
+        .position(|r| r.contains("╭─") && r.contains("web_scan"))
+        .expect("tool-box top border row");
+    let corner_x = rows[top_row].chars().take_while(|c| *c != '╭').count();
+    assert_eq!(
+        buf.content()[top_row * 100 + corner_x].fg,
+        accent,
+        "the `╭` box corner must paint in the accent (Token::Claude) color"
+    );
+    // The bold name: at least one cell on the top border row carries BOLD.
+    let name_bold = (0..100usize).any(|x| buf.content()[top_row * 100 + x].modifier.contains(Modifier::BOLD));
+    assert!(name_bold, "the tool name on the top border must be BOLD (push_tool_box ran), row {top_row}:\n{screen}");
+
+    // (3) The 4 parity invariants — asserted to PASS here (the box rows go through both
+    //     the styled draw and the plain projection, so they stay green by construction).
+    assert_parity_invariants();
+}
+
+/// Run the 4 architecture parity invariants (the same checks the dedicated unit tests
+/// make) inline, so the slice-3 honest check proves they hold WITH a tool BOX present.
+/// A mismatch panics with the offending `(src, width)`.
+fn assert_parity_invariants() {
+    use crate::markdown::{
+        lines_to_plain, lines_to_plain_atomic, render_assistant, render_assistant_cockpit,
+        render_assistant_cockpit_plain, render_assistant_plain, render_assistant_wrapped,
+    };
+    use crate::render::block::{Block as RB, BlockRole};
+    use crate::render::measure::WrapCache;
+
+    let theme = Theme::default_theme();
+    // A source that renders a tool BOX (the slice-3 subject) + prose + CJK so the
+    // invariants are exercised against the new box rows specifically.
+    let src = "Turn 1 ...\n🛠️ web_scan({\"tabs_only\": true})\n[Info] ok\nthen some prose 中文也在这里很长很长会换行\ndone.";
+
+    for width in [20u16, 24, 40, 80, 120] {
+        // I. styled_wrap_rowcount_matches_wrap_cache (un-cockpit).
+        let styled = render_assistant_wrapped(src, &theme, width);
+        let (plain, ranges) = lines_to_plain_atomic(&render_assistant(src, &theme));
+        let rb = RB::finalized(1, BlockRole::Assistant, plain).with_atomic_ranges(ranges);
+        let mut cache = WrapCache::new(width);
+        cache.sync(std::slice::from_ref(&rb));
+        assert_eq!(styled.len(), cache.block_line_count(1), "I width={width}");
+
+        // II. plain_projection_matches_rendered_text (cockpit-plain == styled count).
+        let cstyled = render_assistant_cockpit(src, &theme, false, width);
+        let cplain = render_assistant_cockpit_plain(src, &theme, false, width);
+        assert_eq!(cplain.split('\n').count(), cstyled.len(), "II width={width}");
+
+        // III. cockpit_render_rowcount_matches_plain_projection.
+        let (cp, cr) = lines_to_plain_atomic(&render_assistant_cockpit(src, &theme, false, width));
+        let crb = RB::finalized(2, BlockRole::Assistant, cp).with_atomic_ranges(cr);
+        let mut ccache = WrapCache::new(width);
+        ccache.sync(std::slice::from_ref(&crb));
+        assert_eq!(cstyled.len(), ccache.block_line_count(2), "III width={width}");
+
+        // IV. embedded_newline_in_span_keeps_rowcount_parity — no emitted span carries
+        //     an embedded '\n' (the box rows are single hard lines).
+        for line in render_assistant_cockpit(src, &theme, false, width) {
+            for span in &line.spans {
+                assert!(!span.content.contains('\n'), "IV embedded \\n width={width}: {:?}", span.content);
+            }
+        }
+        // Sanity: the projection round-trips byte-identically (no styling drift).
+        assert_eq!(lines_to_plain(&cstyled), cplain, "cockpit plain projection round-trips width={width}");
+        let _ = render_assistant_plain(src, &theme);
+    }
+}
+
+/// Slice 7 HONEST CHECK — per-command composer-border PARITY with shell `!`, proven on
+/// the LIVE styled path at MONO (NO_COLOR) caps. With `/goal` in the buffer the base
+/// `render_composer` border token is the command accent (`Token::Claude` for Goal), NOT
+/// `Token::Border` — and because the truecolor `draw_composer_border_fx` overlay is
+/// gated OFF here (mono caps), the painted corner cells we read ARE the base border, so
+/// the restyle is visible at every capability level exactly like `!`'s always-on tint. A
+/// plain buffer keeps the neutral `Token::Border` corner (the restyle is command-driven,
+/// not always-on). The 4 parity invariants are asserted green alongside.
+#[test]
+fn live_command_border_restyles_at_mono_like_shell_bang() {
+    use crate::components::cockpit::split_cockpit;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    let theme = Theme::default_theme();
+    let accent = theme.color(crate::theme::Token::Claude); // Goal/Morphling accent.
+    let border = theme.color(crate::theme::Token::Border);
+    let shell_accent = theme.color(crate::theme::Token::ShellAccent);
+    assert_ne!(accent, border, "the command accent differs from the neutral border by construction");
+
+    // Read the composer's top-left `╭` corner FG from the LIVE styled frame for `buf`,
+    // with the effects engine forced to MONO so the truecolor border overlay is a no-op
+    // (we read the BASE render_composer border — the mono/NO_COLOR path).
+    let corner_fg = |buf_text: &str| -> ratatui::style::Color {
+        let (w, h) = (100u16, 24u16);
+        let mut app = AppState::new();
+        app.effects = crate::effects::EffectsEngine::new(crate::effects::ColorCaps::mono());
+        assert!(!app.effects.caps.enabled(), "mono caps → the truecolor border overlay is gated OFF");
+        app.composer.type_str(buf_text);
+        let layout = split_cockpit(&app, Rect::new(0, 0, w, h));
+        let c = layout.composer;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        app.prepare_frame(Rect::new(0, 0, w, h), &theme);
+        let app_ref: &AppState = &app;
+        term.draw(|f| crate::components::render(f, app_ref, &theme, 0)).unwrap();
+        // The top-left border corner cell of the composer block.
+        term.backend().buffer().content()[(c.y as usize) * w as usize + c.x as usize].fg
+    };
+
+    // `/goal` → the base border is the Goal accent (visible at mono), NOT Token::Border.
+    let goal_fg = corner_fg("/goal");
+    assert_eq!(goal_fg, accent, "the `/goal` composer border paints the command accent at mono");
+    assert_ne!(goal_fg, border, "the `/goal` border token differs from the neutral Token::Border (parity with `!`)");
+
+    // Control: a plain buffer keeps the neutral border (the restyle is command-driven).
+    assert_eq!(corner_fg("write the readme"), border, "a plain buffer keeps the neutral Token::Border corner");
+
+    // Parity reference: shell `!` tints the SAME corner hot-pink, also at mono.
+    assert_eq!(corner_fg("!ls -la"), shell_accent, "shell `!` tints the border hot-pink at mono (the template)");
+
+    // The four orchestration commands each restyle the base border to their accent
+    // (Hive→Success, Conductor→Suggestion, Goal/Morphling→Claude) — none stays Border.
+    for (buf, tok) in [
+        ("/hive split it", crate::theme::Token::Success),
+        ("/conductor run", crate::theme::Token::Suggestion),
+        ("/morphling absorb", crate::theme::Token::Claude),
+    ] {
+        let got = corner_fg(buf);
+        assert_eq!(got, theme.color(tok), "`{buf}` border paints {tok:?} at mono");
+        assert_ne!(got, border, "`{buf}` restyles the border off the neutral Token::Border");
+    }
+
+    // The 4 architecture parity invariants stay green with a command border present.
+    assert_parity_invariants();
 }

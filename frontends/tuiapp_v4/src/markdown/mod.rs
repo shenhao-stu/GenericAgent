@@ -158,16 +158,23 @@ pub fn render_assistant_cockpit_full(
         }
         match seg {
             FoldSegment::Fold { title, turn, .. } => {
-                // A folded turn is EXACTLY one `▸ summary` line (dimmed), tagged with
-                // its turn node so a click on the `▸` expands it. The title is
-                // collapsed so it never itself wraps to >1 row.
+                // A folded turn is EXACTLY one ` ▸ summary` line — the `▸` in accent
+                // (tui_v3 narration), the title dim+italic — tagged with its turn node
+                // so a click on the `▸` expands it. The title is clipped so it never
+                // itself wraps to >1 row.
                 logical.push((
-                    Line::from(Span::styled(
-                        fold_header_line(title, width),
-                        Style::default()
-                            .fg(theme.color(crate::theme::Token::Dim))
-                            .add_modifier(Modifier::ITALIC),
-                    )),
+                    Line::from(vec![
+                        Span::styled(
+                            " ▸ ",
+                            Style::default().fg(theme.color(crate::theme::Token::Claude)),
+                        ),
+                        Span::styled(
+                            fold_header_title(title, width),
+                            Style::default()
+                                .fg(theme.color(crate::theme::Token::Dim))
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]),
                     Some(NodeId::Turn { block: folds.block_id, turn: *turn }),
                 ));
             }
@@ -236,12 +243,12 @@ fn merge_node_hit(
     hits.push((start..=end, node));
 }
 
-/// Build a fold header line `▸ <title>` clipped so it never wraps past `width`
-/// (a fold MUST be exactly one visual row). PURE.
-fn fold_header_line(title: &str, width: u16) -> String {
-    let prefix = "▸ ";
-    let avail = (width as usize).saturating_sub(2).max(1);
-    let mut out = String::from(prefix);
+/// Clip a fold-header title so the whole ` ▸ <title>` row never wraps past `width`
+/// (a fold MUST be exactly one visual row). Returns just the clipped title; the
+/// caller draws the ` ▸ ` prefix (3 cells) as its own accent span. PURE.
+fn fold_header_title(title: &str, width: u16) -> String {
+    let avail = (width as usize).saturating_sub(3).max(1);
+    let mut out = String::new();
     let mut acc = 0usize;
     for g in unicode_segmentation::UnicodeSegmentation::graphemes(title, true) {
         let gw = UnicodeWidthStr::width(g);
@@ -277,9 +284,10 @@ pub fn render_assistant_cockpit_plain(
 ///   * the leading `Turn N ...` boundary line is DROPPED (it's spacing, never text);
 ///   * a `<summary>…</summary>` becomes a dim italic breadcrumb above the body
 ///     (the tags themselves are HIDDEN — never shown raw);
-///   * compact `🛠️ name(args)` calls render as CC `⏺`/`○` bullets — each tagged with
-///     a stable block-global [`NodeId::Tool`] (so a click expands its result) and
-///     expanded per `folds`; `tool_idx` is the running block-global tool counter;
+///   * compact `🛠️ name(args)` calls render as tui_v3-style bordered BOXES — each
+///     tagged with a stable block-global [`NodeId::Tool`] (so a click expands its
+///     result) and expanded per `folds`; `tool_idx` is the running block-global tool
+///     counter;
 ///   * `[Action]/[Status]/[Info]` result prefixes stay dim;
 ///   * `!!!Error: …` renders as a compact dim/red line;
 ///   * everything else flows through the markdown walker.
@@ -342,10 +350,10 @@ fn render_turn_body(
             if !prose.trim().is_empty() {
                 push_prose(render_prose_with_inline_markers(prose, theme), logical);
             }
-            // The CC tool-call bullet (NOT a box), tagged with its block-global node.
+            // The tui_v3-style tool-call BOX, tagged with its block-global node.
             let node = NodeId::Tool { block: folds.block_id, tool: *tool_idx };
             let expanded = folds.tool_expanded(*tool_idx);
-            push_tool_bullet(logical, call, theme, width, node, expanded);
+            push_tool_box(logical, call, theme, width, node, expanded);
             *tool_idx += 1;
             // Advance the cursor past this call's result (the next structural marker).
             let header_line_end = body[header_start..]
@@ -365,12 +373,16 @@ fn render_turn_body(
     }
 }
 
-/// Push a tool call as CC bullet rows (§2.3): `⏺ name  args` (bullet + name in the
-/// status color, args dim) then the 2-col-indented dim result rows. No box. Every
-/// row of the bullet (header + result, including the `▸`/`▾` affordance) is tagged
-/// with `node` so the WHOLE bullet is one clickable expand/collapse target (Fix E);
-/// `expanded` skips the result truncation.
-fn push_tool_bullet(
+/// Push a tool call as the styled rows of a tui_v3-style bordered BOX (R1 ITEM 2):
+/// a TOP border `╭─ name  badge  ·tN ─…─╮` (accent frame + BOLD name + colored
+/// badge + dim tag), the interior `│ … │` rows (accent border, dim body), and a
+/// BOTTOM `╰─…─╯` border. Border color = accent ([`Token::Claude`]). Every row of the
+/// box (top, interior, bottom, including the `… +N more`/`▾` affordance row) is tagged
+/// with `node` so the WHOLE box is one clickable expand/collapse target (Fix E);
+/// `expanded` skips the result truncation. The spans' concatenated text is
+/// byte-identical to the `ChipBox`'s plain rows, so the styled draw and the plain
+/// projection stay row-count-identical (the parity invariants).
+fn push_tool_box(
     logical: &mut Vec<(Line<'static>, Option<NodeId>)>,
     call: &crate::render::chip::ToolCall,
     theme: &Theme,
@@ -379,44 +391,96 @@ fn push_tool_bullet(
     expanded: bool,
 ) {
     use crate::theme::Token;
-    let chip = crate::render::chip::render_chip_bullet(call, width, 4, expanded);
-    let status_tok = chip.status.token();
-    // The bullet is a clickable node ONLY when it can actually fold (a long result);
-    // a short result has nothing to expand, so its rows stay un-tagged (a click there
+    let chip = crate::render::chip::render_chip_box(call, width, 4, expanded);
+    let accent = Style::default().fg(theme.color(Token::Claude));
+    // The box is a clickable node ONLY when it can actually fold (a long result); a
+    // short result has nothing to expand, so its rows stay un-tagged (a click there
     // falls through to native selection, like ordinary prose).
     let tag = if chip.expandable { Some(node) } else { None };
 
-    // Header: the bullet + name colored by status, then a dim one-line args.
-    let mut head: Vec<Span> = vec![Span::styled(
-        chip.header_name.clone(),
-        Style::default().fg(theme.color(status_tok)),
-    )];
-    if !chip.args.is_empty() {
-        head.push(Span::styled(
-            format!("  {}", chip.args),
-            Style::default().fg(theme.color(Token::Dim)),
-        ));
-    }
-    logical.push((Line::from(head), tag));
+    // TOP border: split the laid-out line into accent frame + bold name + colored
+    // badge + dim tag spans whose concatenation is byte-identical to `chip.top`. The
+    // layout is `╭─ {name}  {badge}  {tag} ─…─╮`; we carve it on the known pieces.
+    logical.push((Line::from(top_border_spans(&chip, theme)), tag));
 
-    // Result rows: dim, already indented two columns (+ the `▸`/`▾` affordance row).
-    // A `!!!Error:` line inside the result is colored red (a real model/stream
-    // error surfaced in the tool's output) — §1 "compact dim/red error line". The
-    // affordance row (`▸`/`▾`) is colored as a SUGGESTION so it reads as actionable.
-    for row in &chip.result_rows {
-        let trimmed = row.trim_start();
-        let tok = if trimmed.starts_with("!!!Error") {
-            Token::Error
-        } else if trimmed.starts_with('▸') || trimmed.starts_with('▾') {
-            Token::Suggestion
-        } else {
-            Token::Dim
-        };
-        logical.push((
-            Line::from(Span::styled(row.clone(), Style::default().fg(theme.color(tok)))),
-            tag,
-        ));
+    // INTERIOR rows: accent `│`, a dim body (between the framing spaces), accent `│`.
+    // A `!!!Error:` body is red; the `… +N more`/`▾` affordance is a SUGGESTION so it
+    // reads as actionable. The leading/trailing border spaces stay with the body span
+    // so the concatenation matches the plain row exactly.
+    for row in &chip.interior {
+        logical.push((Line::from(interior_spans(row, theme)), tag));
     }
+
+    // BOTTOM border: all accent.
+    logical.push((Line::from(Span::styled(chip.bottom.clone(), accent)), tag));
+}
+
+/// Carve the box top border `╭─ {name}  {badge}  {tag} ─…─╮` into styled spans whose
+/// concatenated text equals the laid-out line byte-for-byte: accent frame, BOLD name,
+/// status-colored badge, dim tag. We locate the name/badge/tag by their known pieces
+/// (the renderer handed them back already-clipped) so we never re-parse glyphs. PURE.
+fn top_border_spans(chip: &crate::render::chip::ChipBox, theme: &Theme) -> Vec<Span<'static>> {
+    use crate::theme::Token;
+    let accent = Style::default().fg(theme.color(Token::Claude));
+    let top = &chip.top;
+    // Find the byte offsets of name, badge, tag in order (each search starts past the
+    // previous match so a name that coincidentally equals the tag can't mis-bind).
+    let name_at = top.find(&chip.top_name);
+    let after_name = name_at.map(|i| i + chip.top_name.len()).unwrap_or(0);
+    let badge_at = top[after_name..].find(&chip.top_badge).map(|i| after_name + i);
+    let after_badge = badge_at.map(|i| i + chip.top_badge.len()).unwrap_or(after_name);
+    let tag_at = top[after_badge..].find(&chip.top_tag).map(|i| after_badge + i);
+
+    // If anything is unexpectedly absent (extreme narrow clip), fall back to one
+    // accent span so the row is still drawn and the plain projection still matches.
+    let (Some(name_at), Some(badge_at), Some(tag_at)) = (name_at, badge_at, tag_at) else {
+        return vec![Span::styled(top.clone(), accent)];
+    };
+    let after_tag = tag_at + chip.top_tag.len();
+
+    let span = |range: std::ops::Range<usize>, style: Style| Span::styled(top[range].to_string(), style);
+    vec![
+        span(0..name_at, accent),                                              // `╭─ `
+        span(name_at..name_at + chip.top_name.len(),
+             Style::default().fg(theme.color(Token::Text)).add_modifier(Modifier::BOLD)), // name
+        span(name_at + chip.top_name.len()..badge_at, accent),                 // `  `
+        span(badge_at..badge_at + chip.top_badge.len(),
+             Style::default().fg(theme.color(chip.status.token()))),           // badge
+        span(badge_at + chip.top_badge.len()..tag_at, accent),                 // `  `
+        span(tag_at..after_tag, Style::default().fg(theme.color(Token::Dim))), // `·tN`
+        span(after_tag..top.len(), accent),                                    // ` ─…─╮`
+    ]
+}
+
+/// Carve an interior box row `│ {body} │` into `[accent │][styled body+frame][accent │]`
+/// spans whose concatenation equals the row byte-for-byte. The middle span keeps the
+/// framing spaces (` … `) so it matches the plain row; its color is dim, red for a
+/// `!!!Error:` body, or Suggestion for the `… +N more`/`▾` fold affordance. PURE.
+fn interior_spans(row: &str, theme: &Theme) -> Vec<Span<'static>> {
+    use crate::theme::Token;
+    let accent = Style::default().fg(theme.color(Token::Claude));
+    // The row is `│` + middle + `│`; carve on the first/last `│` (the only verticals).
+    let first = row.char_indices().next();
+    let last = row.char_indices().rev().next();
+    let (Some((_, '│')), Some((li, '│'))) = (first, last) else {
+        // Not a framed row (shouldn't happen) — emit verbatim so parity holds.
+        return vec![Span::raw(row.to_string())];
+    };
+    let lead = '│'.len_utf8();
+    let middle = &row[lead..li];
+    let trimmed = middle.trim_start();
+    let tok = if trimmed.starts_with("!!!Error") {
+        Token::Error
+    } else if trimmed.starts_with("… +") || trimmed.starts_with('▾') {
+        Token::Suggestion
+    } else {
+        Token::Dim
+    };
+    vec![
+        Span::styled("│".to_string(), accent),
+        Span::styled(middle.to_string(), Style::default().fg(theme.color(tok))),
+        Span::styled("│".to_string(), accent),
+    ]
 }
 
 /// Render prose that may carry inline `[Action]/[Status]/[Info]` result lines and
@@ -448,6 +512,17 @@ fn render_prose_with_inline_markers(text: &str, theme: &Theme) -> Vec<Line<'stat
 
     for line in text.split('\n') {
         let l = line.trim_start();
+        // A `Turn N ...` marker line is spacing, NEVER content — drop it wherever it
+        // appears in a turn body, not just the leading line. (The leading strip in
+        // `render_turn_body` only handles a marker that opens the body; a single-turn
+        // body with PREAMBLE before the marker, or a tail dump, keeps the marker
+        // mid-body — this is the C1-F6 / Q8 "Turn 1 …" leak. PURE.)
+        if crate::render::chip::find_turn_line(line) == Some(0) {
+            // Preserve vertical spacing: a dropped marker becomes a blank row so the
+            // turn separation the reader expects is kept (matches the §2.4 blank line).
+            flush(&mut prose_buf, &mut out);
+            continue;
+        }
         if l.starts_with("!!!Error") {
             flush(&mut prose_buf, &mut out);
             // A real model/stream error → a compact dim/red line (no wall).
@@ -918,6 +993,38 @@ pub fn line_width(line: &Line<'static>) -> usize {
 mod tests {
     use super::*;
 
+    /// Regression for the C1-F6 / Q8 "Turn N …" leak (round-4 diagnosis): a single
+    /// `Turn N ...` marker preceded by PREAMBLE prose (or appearing mid-body in a
+    /// volatile tail dump) must be dropped — `fold_turns_with` returns the whole text
+    /// as ONE `Text` segment when there are <2 markers, so the leading strip never
+    /// sees the marker. We render BOTH the streaming and finalized cockpit projection
+    /// and assert "Turn" appears nowhere, while the surrounding prose is kept.
+    #[test]
+    fn turn_marker_with_preamble_is_stripped() {
+        let theme = Theme::default_theme();
+        let proj = |src: &str, streaming: bool, w: u16| -> String {
+            let r = render_assistant_cockpit_full(src, &theme, &BlockFolds::plain(0, false), w, streaming);
+            lines_to_plain(&r.lines)
+        };
+        let cases = [
+            "Some intro prose.\nTurn 1 ...\nthe answer is 42",
+            "Let me think.\nTurn 1 ...\n<summary>x</summary>\nok",
+            "committed.\n\nprose line\nTurn 5 ...\n<summary>scanning",
+        ];
+        for src in cases {
+            for w in [40u16, 80, 100] {
+                for streaming in [false, true] {
+                    let p = proj(src, streaming, w);
+                    assert!(!p.contains("Turn"), "Turn marker leaked (streaming={streaming} w={w}): {p:?}");
+                }
+            }
+        }
+        // The surrounding prose survives the strip.
+        let kept = proj("Some intro prose.\nTurn 1 ...\nthe answer is 42", false, 100);
+        assert!(kept.contains("Some intro prose."), "preamble kept: {kept:?}");
+        assert!(kept.contains("the answer is 42"), "post-marker body kept: {kept:?}");
+    }
+
     #[test]
     fn routes_block_math_to_stacked_layout() {
         let theme = Theme::default_theme();
@@ -1213,12 +1320,13 @@ done.";
         // BARE GA turn markers (tui_v4 non-verbose) + a summary per turn.
         let src = "Turn 1 ...\n<summary>first thing</summary>\nbody one\nTurn 2 ...\n<summary>second</summary>\nbody two";
         let lines = render_assistant_cockpit(src, &theme, false, 80);
-        // Turn 1 collapses to a single `▸ first thing` line (its summary as title).
+        // Turn 1 collapses to a single ` ▸ first thing` line (leading space + accent
+        // `▸`, summary as the dim title — tui_v3 narration styling).
         let joined: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        assert!(joined.iter().any(|l| l == "▸ first thing"));
+        assert!(joined.iter().any(|l| l == " ▸ first thing"));
         // Turn 2 (the last) stays expanded — its body is present.
         assert!(joined.iter().any(|l| l.contains("body two")));
     }
@@ -1267,8 +1375,8 @@ done.";
     /// REGRESSION against REAL captured GA output (the `code_run` multi-turn trace
     /// recorded from a live `ga_bridge.py` session): bare `Turn N ...` boundaries,
     /// `<summary>…</summary>`, and compact `🛠️ code_run({…json…})` with nested braces
-    /// in the args. The renderer must hide every raw marker and surface ⏺ bullets +
-    /// breadcrumbs — this is the exact format that motivated the redesign.
+    /// in the args. The renderer must hide every raw marker and surface bordered tool
+    /// boxes + breadcrumbs — this is the exact format that motivated the redesign.
     #[test]
     fn real_ga_code_run_trace_renders_clean() {
         let theme = Theme::default_theme();
@@ -1289,15 +1397,17 @@ done.";
         // The final (expanded) turn's output renders.
         assert!(plain.contains("hi"));
 
-        // EXPANDED-tool check: a SINGLE-turn version (the active turn) shows the
-        // summary as a dim `↳` breadcrumb + the compact tool as a ⏺ bullet with its
-        // nested-brace JSON args parsed whole.
-        let one = "Turn 1 ...\n<summary>准备执行echo hi</summary>\n🛠️ code_run({\"script\": \"echo hi\", \"type\": \"powershell\"})\n[Info] ok";
+        // BOX check: a SINGLE-turn version (the active turn) shows the summary as a
+        // dim `↳` breadcrumb + the compact tool as a bordered box whose top border
+        // carries the name; the `script` priority field is plucked as the arg-hint
+        // (parsed whole out of the nested-brace JSON).
+        let one = "Turn 1 ...\n<summary>准备执行echo hi</summary>\n🛠️ code_run({\"script\": \"echo hi\", \"type\": \"powershell\"})\nhi there";
         let oplain = render_assistant_cockpit_plain(one, &theme, false, 100);
         assert!(oplain.contains("↳ 准备执行echo hi"), "active-turn summary as breadcrumb: {oplain:?}");
-        assert!(oplain.contains("⏺ code_run"), "compact tool as ⏺ bullet: {oplain:?}");
-        assert!(oplain.contains("powershell"), "nested-brace JSON args parsed whole");
-        assert!(oplain.contains("  [Info] ok"), "result indented 2 cols");
+        assert!(oplain.contains("╭─"), "compact tool as a bordered box: {oplain:?}");
+        assert!(oplain.contains("code_run"), "tool name on the box top border: {oplain:?}");
+        assert!(oplain.contains("echo hi"), "the `script` arg-hint is plucked whole: {oplain:?}");
+        assert!(oplain.contains("hi there"), "the result preview is inside the box: {oplain:?}");
 
         // And the streaming path (an in-flight final turn) never panics / corrupts.
         let _ = render_assistant_cockpit_streaming(src, &theme, false, 100, true);
@@ -1376,20 +1486,31 @@ done.";
         assert!(pplain.contains("$5.00"), "a currency dollar must not be trimmed: {pplain:?}");
     }
 
-    /// The compact `🛠️ name(args)` tool call renders as a CC `⏺` bullet + the tool
-    /// name + a dim one-line args + the 2-col-indented `[Info]` result — and NOT as
-    /// a heavy box, and the raw `🛠️` marker never survives to the output (§2.3).
+    /// The compact `🛠️ name(args)` tool call renders as a tui_v3-style bordered BOX
+    /// (R1 ITEM 2): the tool name + `✓ ok` badge + `·tN` tag on the `╭─ … ─╮` top
+    /// border, the args as the arg-hint interior row, the `[Info]`-derived result
+    /// content (meta prefix skipped) on its own interior row, a `╰─…─╯` bottom border
+    /// — and the raw `🛠️` marker never survives to the output.
     #[test]
-    fn compact_tool_call_renders_as_bullet_not_box() {
+    fn compact_tool_call_renders_as_box() {
         let theme = Theme::default_theme();
         let src = "Turn 1 ...\n🛠️ web_scan({\"tabs_only\": true})\n[Info] 3 tabs scanned · ok";
         let plain = render_assistant_cockpit_plain(src, &theme, false, 80);
-        assert!(plain.contains("⏺ web_scan"), "CC bullet + tool name: {plain:?}");
-        assert!(plain.contains("{\"tabs_only\": true}"), "args shown as a dim one-liner");
-        assert!(plain.contains("  [Info] 3 tabs scanned"), "result indented 2 cols, prefix kept");
-        // No raw tool marker, no box glyphs.
+        // Box glyphs are PRESENT now (the whole point of slice 3).
+        assert!(plain.contains("╭─"), "top border present: {plain:?}");
+        assert!(plain.contains('╰') && plain.contains('╯'), "bottom border present: {plain:?}");
+        assert!(plain.contains('│'), "interior verticals present: {plain:?}");
+        // Name + badge + turn-id on the top border line.
+        let top = plain.lines().find(|l| l.contains("╭─")).expect("a top border line");
+        assert!(top.contains("web_scan"), "tool name on the top border: {top:?}");
+        assert!(top.contains("✓ ok"), "status badge on the top border: {top:?}");
+        assert!(top.contains("·t1"), "turn-id on the top border: {top:?}");
+        // args as the arg-hint; the [Info] result body inside (meta prefix skipped).
+        assert!(plain.contains("tabs_only"), "args shown as the arg-hint: {plain:?}");
+        assert!(plain.contains("3 tabs scanned"), "result content inside the box: {plain:?}");
+        assert!(!plain.contains("[Info]"), "the meta prefix is stripped inside the box: {plain:?}");
+        // No raw tool marker.
         assert!(!plain.contains("🛠️"), "the raw tool marker must not render");
-        assert!(!plain.contains('╭') && !plain.contains('│') && !plain.contains('╰'), "no box");
     }
 
     /// Fix A acceptance (Q3, the #1 latex bug): a rendered inline-math glyph run is

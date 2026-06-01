@@ -398,7 +398,10 @@ pub(crate) fn handle_overlay_key(key: KeyEvent, app: &mut AppState) {
         // lazily re-filters via the on-disk head-window reader; Up/Down move; Enter
         // restores the selected log via the EXISTING restore path; Esc closes.
         Overlay::Continue(mut picker) => {
-            use components::continue_picker::read_head_window;
+            // Editing applies the cheap META filter at once; the lazy content grep
+            // is deferred to `picker.tick()` (driven by `app.tick()`) after typing
+            // pauses, so the spinner_tick is the debounce clock.
+            let now_tick = app.spinner_tick;
             match code {
                 KeyCode::Esc => { /* closed (taken) */ }
                 KeyCode::Up => {
@@ -410,7 +413,7 @@ pub(crate) fn handle_overlay_key(key: KeyEvent, app: &mut AppState) {
                     app.overlay = Some(Overlay::Continue(picker));
                 }
                 KeyCode::Backspace => {
-                    picker.backspace(read_head_window);
+                    picker.backspace(now_tick);
                     app.overlay = Some(Overlay::Continue(picker));
                 }
                 KeyCode::Enter => {
@@ -427,7 +430,7 @@ pub(crate) fn handle_overlay_key(key: KeyEvent, app: &mut AppState) {
                     }
                 }
                 KeyCode::Char(c) if !ctrl => {
-                    picker.type_char(c, read_head_window);
+                    picker.type_char(c, now_tick);
                     app.overlay = Some(Overlay::Continue(picker));
                 }
                 _ => app.overlay = Some(Overlay::Continue(picker)),
@@ -547,4 +550,75 @@ fn dashboard_quick_reply(app: &mut AppState, id: u64, text: String) {
         app.push_user(text.clone());
     }
     app.emit(AppEvent::ToSession(id, UiToCore::Submit { text, images: None }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::continue_picker::{ContinuePicker, ContinueSession, GREP_DEBOUNCE_TICKS};
+    use std::path::PathBuf;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Slice-9 honest check on the LIVE key path (`handle_overlay_key`, the same fn
+    /// the event loop calls): driving the `/continue` overlay with real key events
+    /// (1) filters the META immediately while the content grep only contributes after
+    /// the debounce TICK, and (2) Enter still routes `Command{restore}` into the
+    /// emitted intent the bus performs (→ `ga_bridge.handle_restore`).
+    #[test]
+    fn continue_overlay_two_stage_and_restore_routing() {
+        let session = ContinueSession {
+            path: PathBuf::from("/temp/model_responses/model_responses_777.txt"),
+            mtime: 100,
+            preview: "fix the login bug".into(),
+            rounds: 7,
+        };
+        let mut app = AppState::new();
+        app.overlay = Some(app::Overlay::Continue(ContinuePicker::new(vec![session])));
+
+        // Type a term that is NOT in the META (basename/preview) — only the live
+        // read_head_window grep over the real (absent) file could match it, and it
+        // can't, but the point is the STAGE-1 result must be computed with no grep.
+        for c in "zzqq".chars() {
+            handle_overlay_key(press(KeyCode::Char(c)), &mut app);
+        }
+        let pick = match app.overlay.as_ref() {
+            Some(app::Overlay::Continue(p)) => p,
+            _ => panic!("overlay should still be the Continue picker"),
+        };
+        // STAGE 1: META-only filtered it out immediately AND a grep is armed (pending),
+        // i.e. typing did not run the content grep inline.
+        assert_eq!(pick.matches(), 0, "META filter applied immediately");
+        assert!(pick.grep_pending(), "content grep is deferred, not run on the keystroke");
+
+        // STAGE 2: ticking past the debounce window runs the grep (here it reads the
+        // real — missing — file, so the match set stays 0, but the grep disarms,
+        // proving the two-stage hand-off fired off the keystroke path).
+        for _ in 0..=GREP_DEBOUNCE_TICKS {
+            app.tick();
+        }
+        let pick = match app.overlay.as_ref() {
+            Some(app::Overlay::Continue(p)) => p,
+            _ => panic!("overlay still open"),
+        };
+        assert!(!pick.grep_pending(), "the debounced grep fired on a later tick");
+
+        // Now clear the query so the single session matches again, then Enter.
+        for _ in 0..4 {
+            handle_overlay_key(press(KeyCode::Backspace), &mut app);
+        }
+        assert!(app.overlay.is_some(), "overlay open before Enter");
+        handle_overlay_key(press(KeyCode::Enter), &mut app);
+
+        // Enter consumed (closed) the overlay AND emitted the restore intent.
+        assert!(app.overlay.is_none(), "Enter closed the picker");
+        let restored = app.drain_actions().into_iter().any(|ev| {
+            matches!(ev, AppEvent::ToActive(UiToCore::Command { name, args })
+                if name == "restore"
+                    && args == "/temp/model_responses/model_responses_777.txt")
+        });
+        assert!(restored, "Enter routes Command{{restore}} → handle_restore path");
+    }
 }

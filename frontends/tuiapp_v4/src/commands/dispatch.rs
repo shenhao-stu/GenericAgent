@@ -9,7 +9,6 @@ use crate::app_event::AppEvent;
 use crate::bridge::protocol::UiToCore;
 use crate::clipboard;
 use crate::components;
-use crate::effects;
 use crate::flavor;
 use crate::i18n;
 use crate::input;
@@ -132,11 +131,11 @@ pub(crate) fn open_ui_command(app: &mut AppState, name: &str, args: &str) {
             }
             app.open_picker(picker, Some(backup));
         }
-        "emoji" => {
-            // Pet/spinner style picker (preview on move). Rows = the 5 pet styles +
-            // Off, then the 3 spinner styles, all mapped onto a stable id.
+        "pets" => {
+            // Pet-style picker (preview on move). Rows = the 5 pet styles + Off, each
+            // on a stable id; spinner style is no longer user-configurable here (Slice 6).
             let items = emoji_picker_items(app);
-            let backup = app.theme.clone(); // emoji previews don't touch theme; backup harmless.
+            let backup = app.theme.clone(); // pet previews don't touch theme; backup harmless.
             app.open_picker(Picker::new(PickerKind::Emoji, items), Some(backup));
         }
         "effort" => {
@@ -203,9 +202,26 @@ pub(crate) fn open_ui_command(app: &mut AppState, name: &str, args: &str) {
         "continue" => {
             // Searchable picker over the model_responses_*.txt logs (content-grep +
             // lazy load), restoring the selected log via the existing restore path.
+            // `/continue N` is the non-interactive form (v2 `tuiapp_v2.py:3897-3903`):
+            // a bare 1-based integer restores the N-th most-recent session directly,
+            // skipping the picker.
             let sessions = components::continue_picker::list_sessions(&app.repo_root, None);
             if sessions.is_empty() {
                 app.push_notice(i18n::tf(app.lang, "continue.empty"));
+                return;
+            }
+            if let Ok(n) = args.trim().parse::<usize>() {
+                match n.checked_sub(1).and_then(|i| sessions.get(i)) {
+                    Some(s) => {
+                        let path = s.path.to_string_lossy().into_owned();
+                        app.emit(AppEvent::ToActive(UiToCore::Command {
+                            name: "restore".into(),
+                            args: path,
+                        }));
+                        app.push_notice(i18n::tf(app.lang, "continue.restoring"));
+                    }
+                    None => app.push_notice(i18n::tf(app.lang, "continue.no_match")),
+                }
                 return;
             }
             app.open_overlay(app::Overlay::Continue(
@@ -305,33 +321,6 @@ pub(crate) fn app_command(app: &mut AppState, name: &str, args: &str) {
         "reload-keys" => {
             app.emit(AppEvent::ToActive(UiToCore::Command { name: "reload-keys".into(), args: String::new() }));
             app.push_notice(i18n::tf(app.lang, "cmd.reloading_keys"));
-        }
-        "effects" => {
-            // `/effects [demo|off|subtle|full]` (§9). `demo` opens a transient splash
-            // overlay showing every effect; off/subtle/full set the persistent mode.
-            use effects::EffectMode;
-            let arg = args.trim().to_ascii_lowercase();
-            let token = if arg.is_empty() { "off" } else { arg.as_str() };
-            match token {
-                "demo" => {
-                    app.start_effects_demo();
-                    app.push_notice(format!("{}: demo", i18n::t(app.lang, "cmd.effects")));
-                }
-                other => match EffectMode::parse(other) {
-                    Some(mode) => {
-                        app.set_effects_mode(mode);
-                        app.push_notice(format!(
-                            "{}: {}",
-                            i18n::t(app.lang, "cmd.effects"),
-                            mode.label()
-                        ));
-                    }
-                    None => app.push_notice(format!(
-                        "{} '{other}' (demo|off|subtle|full)",
-                        i18n::t(app.lang, "cmd.effects")
-                    )),
-                },
-            }
         }
         _ => app.push_notice(format!("/{name} {}", i18n::t(app.lang, "cmd.not_handled"))),
     }
@@ -535,25 +524,22 @@ pub(crate) fn strip_theme_label(label: &str) -> String {
     label.trim().to_string()
 }
 
-/// Apply an `/emoji` picker choice by its row id (pet ids 0..=5, spinner 100..=102).
+/// Apply a `/pets` picker choice by its row id (pet ids 0..=4, Off = 5).
 pub(crate) fn apply_emoji_choice(app: &mut AppState, id: usize) {
-    use flavor::{PetStyle, SpinnerStyle};
+    use flavor::PetStyle;
     if id < 5 {
         app.pet_style = PetStyle::all()[id];
     } else if id == 5 {
         app.pet_style = PetStyle::Off;
-    } else if (100..103).contains(&id) {
-        app.spinner_style = [SpinnerStyle::Arc, SpinnerStyle::Braille, SpinnerStyle::Pulse][id - 100];
     }
 }
 
-/// Build the `/emoji` picker rows: the 5 pet styles + Off (ids 0..=5) then the 3
-/// spinner styles (ids 100..=102), each marked current if active. PURE-ish.
+/// Build the `/pets` picker rows: the 5 pet styles + Off (ids 0..=5), each marked
+/// current if active. Spinner style is no longer offered here (Slice 6). PURE-ish.
 pub(crate) fn emoji_picker_items(app: &AppState) -> Vec<components::picker::PickItem> {
     use components::picker::PickItem;
-    use flavor::{PetStyle, SpinnerStyle};
+    use flavor::PetStyle;
     let pet = i18n::t(app.lang, "emoji.pet");
-    let spinner = i18n::t(app.lang, "emoji.spinner");
     let off = i18n::t(app.lang, "emoji.off");
     let mut items: Vec<PickItem> = Vec::new();
     for (i, style) in PetStyle::all().iter().enumerate() {
@@ -564,16 +550,6 @@ pub(crate) fn emoji_picker_items(app: &AppState) -> Vec<components::picker::Pick
         );
     }
     items.push(PickItem::new(5, format!("{pet} · {off}")).current(app.pet_style == PetStyle::Off));
-    for (i, style) in [SpinnerStyle::Arc, SpinnerStyle::Braille, SpinnerStyle::Pulse]
-        .iter()
-        .enumerate()
-    {
-        items.push(
-            PickItem::new(100 + i, format!("{spinner} · {}", style.name()))
-                .with_detail(style.glyph(0).to_string())
-                .current(*style == app.spinner_style),
-        );
-    }
     items
 }
 
@@ -644,6 +620,47 @@ mod tests {
     use super::*;
     use crate::bridge::protocol::CoreToUi;
     use crate::bridge::BridgeEvent;
+
+    /// Slice 6 HONEST CHECK: built on a LIVE `AppState`, the `/pets` (alias `/emoji`)
+    /// picker is pet styles + Off ONLY — ZERO spinner rows (no id ≥ 100, no
+    /// arc/braille/pulse/spinner label); the pet defaults to Bear; and the dynamic
+    /// `terminal_title()` carries the bear face + the active session name +
+    /// "GenericAgent", never "NativeClaude".
+    #[test]
+    fn pets_picker_has_zero_spinner_rows_and_bear_title() {
+        use crate::flavor::PetStyle;
+        let app = AppState::new();
+
+        // Default pet = bear (the tab identity), and `/pets` resolves (so does `/emoji`).
+        assert_eq!(PetStyle::default(), PetStyle::Bear);
+        assert_eq!(app.pet_style, PetStyle::Bear);
+        assert!(crate::commands::resolve("pets").is_some(), "/pets resolves");
+        assert_eq!(crate::commands::resolve("emoji").unwrap().alias_of, Some("pets"), "/emoji is an alias of /pets");
+
+        // The picker is the 5 pet styles + Off (ids 0..=5) — NOTHING else.
+        let items = emoji_picker_items(&app);
+        assert_eq!(items.len(), 6, "pet styles + Off only, got {:?}", items);
+        assert!(
+            items.iter().all(|it| it.id <= 5),
+            "no spinner row (id ≥ 100) survives in the picker: {:?}",
+            items.iter().map(|it| (it.id, it.label.clone())).collect::<Vec<_>>()
+        );
+        for bad in ["spinner", "arc", "braille", "pulse"] {
+            assert!(
+                !items.iter().any(|it| it.label.to_ascii_lowercase().contains(bad)),
+                "no `{bad}` row in the pet picker: {:?}",
+                items.iter().map(|it| it.label.clone()).collect::<Vec<_>>()
+            );
+        }
+
+        // The dynamic tab title: bear face + active session name + GenericAgent, no NativeClaude.
+        let title = app.terminal_title();
+        let bear_calm = crate::flavor::PETS_BEAR[0][0]; // "ʕ•ᴥ•ʔ"
+        assert!(title.starts_with(bear_calm), "the title leads with the bear face: {title:?}");
+        assert!(title.contains(app.sessions.active_name()), "the active session name is in the title: {title:?}");
+        assert!(title.contains("GenericAgent"), "GenericAgent is in the title: {title:?}");
+        assert!(!title.contains("NativeClaude"), "the title must NOT contain NativeClaude: {title:?}");
+    }
 
     /// THE deliverable test: the `/rewind` truncation COUNT.
     ///

@@ -12,7 +12,7 @@ use crate::app::{AppState, ConnStatus};
 use crate::components::text::{
     clip_to, fmt_dur, human_count, llm_channel, truncate_model, MODEL_LABEL_CAP,
 };
-use crate::flavor::{self, heat_bold, heat_token, PetStyle};
+use crate::flavor::{self, heat_bold, heat_token};
 use crate::theme::{Theme, Token};
 
 /// SEPARATOR: the full-width rainbow 7-stop line (§5 / §9). Upgraded from the old flat
@@ -32,16 +32,24 @@ pub(crate) fn render_separator(frame: &mut Frame, area: Rect, app: &AppState, th
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// SPINNER band (only when busy): <pet> <spinner> <Gerund>… <elapsed>s · ctx bar.
-/// Q9: the spinner glyph is a STATIC `⠿` (braille all-dots, U+283F) — the motion
-/// comes from the pet blink + the rotating gerund + the heat-color ramp, not a
-/// per-tick glyph cycle (so we no longer index `spinner_style`).
+/// SPINNER status line (only when busy), CC `SpinnerAnimationRow` composition:
+/// `<glyph> <Gerund>… (<elapsed> · ↓ <tokens> tokens · thinking <effort>)`. The leading
+/// glyph ANIMATES — it cycles `app.spinner_style`'s frames at the 0.1s `tick`
+/// (default braille `⠋⠙⠹…`); the done-line (`render_done_line`) keeps the static
+/// `⠿`, and busy/done are mutually exclusive so the spinner settles on `⠿` when the
+/// turn ends. NO emoji pet here — the pet lives in the tab title; the spinner is
+/// braille-only. The `(…)` group is dim chrome with parens; only the live token
+/// NUMBER (Text) and the effort phrase (Claude) brighten so the eye lands on them.
+/// `↓` is CC's per-turn token arrow, trailed by the i18n `tokens.unit` word. The effort reads as a "thinking …" phrase
+/// (i18n `spinner.thinking` + level → "thinking with max effort"); with no effort
+/// it shows the non-thinking label. Progressive width-gating (R5): when the full
+/// line overruns `area.width` the tokens part is dropped FIRST so the gerund +
+/// elapsed + thinking phrase stay legible on a narrow terminal.
 pub(crate) fn render_spinner(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, now_ms: u64) {
     let elapsed = app.turn_elapsed_ms(now_ms);
     let tick = (now_ms / 100) as u64;
-    let glyph = '⠿';
-    let tok = heat_token(elapsed);
-    let mut heat_style = Style::default().fg(theme.color(tok));
+    let glyph = app.spinner_style.glyph(tick);
+    let mut heat_style = Style::default().fg(theme.color(heat_token(elapsed)));
     if heat_bold(elapsed) {
         heat_style = heat_style.add_modifier(Modifier::BOLD);
     }
@@ -49,43 +57,45 @@ pub(crate) fn render_spinner(frame: &mut Frame, area: Rect, app: &AppState, them
     let dim = Style::default().fg(theme.color(Token::Dim));
     let text = Style::default().fg(theme.color(Token::Text));
 
-    let mut spans: Vec<Span> = Vec::new();
-    // LEAD (unchanged GA signature): pet face (heat-colored, ~0.5s blink) + spinner
-    // glyph + gerund. The pet/glyph carry the heat ramp; the gerund is plain text.
-    if app.pet_style != PetStyle::Off {
-        let face = flavor::pet(app.pet_style, elapsed, tick);
-        if !face.is_empty() {
-            spans.push(Span::styled(format!("{face} "), heat_style));
+    let lead = vec![
+        Span::styled(format!("{glyph} "), heat_style),
+        Span::styled(format!("{}…", flavor::gerund(app.lang, tick)), text),
+    ];
+    let thinking = crate::i18n::thinking_phrase(app.lang, app.effort_label());
+
+    // Build the `(…)` group with the tokens part, then drop ONLY the tokens part if
+    // the whole line overruns the width (R5 progressive gating). Elapsed + the
+    // thinking phrase always stay.
+    let group = |with_tokens: bool| -> Vec<Span<'static>> {
+        let mut g = vec![
+            Span::styled(" (".to_string(), dim),
+            Span::styled(format!("{secs:.1}s"), dim),
+        ];
+        if with_tokens {
+            if let Some(tokens) = app.tokens {
+                g.push(Span::styled(" · ↓ ".to_string(), dim));
+                g.push(Span::styled(human_count(tokens), text));
+                g.push(Span::styled(format!(" {}", crate::i18n::t(app.lang, "tokens.unit")), dim));
+            }
         }
-    }
-    spans.push(Span::styled(format!("{glyph} "), heat_style));
-    spans.push(Span::styled(format!("{}…", flavor::gerund(app.lang, tick)), text));
+        g.push(Span::styled(" · ".to_string(), dim));
+        g.push(Span::styled(thinking.clone(), Style::default().fg(theme.color(Token::Claude))));
+        g.push(Span::styled(")".to_string(), dim));
+        g
+    };
 
-    // STATUS group — a CC-style ` (elapsed · ↑in ↓out · ctx ▰▱ pct% · effort)`
-    // (SpinnerAnimationRow.tsx): dim chrome + parens, with only the live token
-    // NUMBERS (Text) and the effort level (Claude) brightened so the eye lands on
-    // them. `↑`/`↓` are the per-call input/output sizes (tui_v3 readout + CC's
-    // arrows); they appear once the first LLM response of the turn lands.
-    spans.push(Span::styled(" (".to_string(), dim));
-    spans.push(Span::styled(format!("{secs:.1}s"), dim));
-    if app.tok_in.is_some() || app.tok_out.is_some() {
-        spans.push(Span::styled(" · ↑".to_string(), dim));
-        spans.push(Span::styled(human_count(app.tok_in.unwrap_or(0)), text));
-        spans.push(Span::styled(" ↓".to_string(), dim));
-        spans.push(Span::styled(human_count(app.tok_out.unwrap_or(0)), text));
-    }
-    if let Some(pct) = app.context_percent {
-        spans.push(Span::styled(format!(" · ctx {}", ctx_bar(pct)), dim));
-    }
-    if let Some(effort) = app.effort_label() {
-        spans.push(Span::styled(" · ".to_string(), dim));
-        spans.push(Span::styled(
-            effort.to_string(),
-            Style::default().fg(theme.color(Token::Claude)),
-        ));
-    }
-    spans.push(Span::styled(")".to_string(), dim));
+    let line_width = |g: &[Span]| -> usize {
+        use unicode_width::UnicodeWidthStr;
+        lead.iter().chain(g).map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum()
+    };
 
+    let mut group_spans = group(true);
+    if line_width(&group_spans) > area.width as usize {
+        group_spans = group(false);
+    }
+
+    let mut spans = lead.clone();
+    spans.extend(group_spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -93,8 +103,7 @@ pub(crate) fn render_spinner(frame: &mut Frame, area: Rect, app: &AppState, them
 /// settled `⠿ <gerund> for <fmt_dur> · ↑ <in> · ↓ <out>` summary. FROZEN — the `⠿`
 /// is a static mint glyph and the duration/tokens don't animate (the turn is over).
 /// Mirrors the spinner's `(…)`-less readout but left-aligned with bright numbers.
-/// The gerund index is derived from the (frozen) elapsed seconds so it stays stable
-/// while idle and reads as "what just happened".
+/// The gerund index derives from the frozen elapsed seconds so it stays stable.
 pub(crate) fn render_done_line(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
     let ms = app.last_turn_ms.unwrap_or(0);
     let secs = ms / 1000;
@@ -123,20 +132,32 @@ pub(crate) fn render_done_line(frame: &mut Frame, area: Rect, app: &AppState, th
 pub(crate) fn render_session_info(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
     let dim = Style::default().fg(theme.color(Token::Dim));
     let sep = || Span::styled("  ·  ".to_string(), dim);
-    let llm = llm_channel(app.model.as_deref());
-    let model = truncate_model(app.model.as_deref().unwrap_or("—"), MODEL_LABEL_CAP);
-    let effort = app.effort_label().unwrap_or("—");
+    // FOOTER identity (Slice 4) = the SAME wire identity the header uses (Slice 1/2):
+    // prefer `llm_name` (codex-pro) / `model_real` (gpt-5.5), falling back to the
+    // routing channel / truncated `model` only when the bridge omitted them.
+    let llm = match app.llm_name.as_deref() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => llm_channel(app.model.as_deref()).to_string(),
+    };
+    let model = match app.model_real.as_deref() {
+        Some(real) if !real.is_empty() => truncate_model(real, MODEL_LABEL_CAP),
+        _ => truncate_model(app.model.as_deref().unwrap_or("—"), MODEL_LABEL_CAP),
+    };
+    let effort = app
+        .effort_label()
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::i18n::t(app.lang, "effort.none").to_string());
     let ctx = match app.context_percent {
         Some(p) => format!("ctx {p:.0}%"),
         None => "ctx —".to_string(),
     };
     let branch = app.git_branch.as_deref().unwrap_or("—");
     let mut spans: Vec<Span> = vec![
-        Span::styled(llm.to_string(), Style::default().fg(theme.color(Token::Suggestion))),
+        Span::styled(llm, Style::default().fg(theme.color(Token::Suggestion))),
         sep(),
         Span::styled(model, Style::default().fg(theme.color(Token::Claude))),
         sep(),
-        Span::styled(effort.to_string(), Style::default().fg(theme.color(Token::PlanMode))),
+        Span::styled(effort, Style::default().fg(theme.color(Token::PlanMode))),
         sep(),
         Span::styled(ctx, dim),
         sep(),
@@ -177,37 +198,24 @@ pub(crate) fn render_tips(frame: &mut Frame, area: Rect, app: &AppState, theme: 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// A tiny context bar `▰▰▰▱▱ 50%` for a percent. PURE-ish helper.
-pub(crate) fn ctx_bar(pct: f64) -> String {
-    let filled = ((pct / 100.0) * 5.0).round().clamp(0.0, 5.0) as usize;
-    let bar: String = (0..5).map(|i| if i < filled { '▰' } else { '▱' }).collect();
-    format!("{bar} {pct:.0}%")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::app::AppState;
     use crate::bridge::protocol::CoreToUi;
     use crate::bridge::BridgeEvent;
     use crate::components::render;
+    use crate::flavor::{PetStyle, SpinnerStyle};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    #[test]
-    fn ctx_bar_fills_proportionally() {
-        assert_eq!(ctx_bar(0.0), "▱▱▱▱▱ 0%");
-        assert_eq!(ctx_bar(100.0), "▰▰▰▰▰ 100%");
-        assert!(ctx_bar(50.0).contains("50%"));
-    }
-
-    /// Render the whole cockpit for `app` into a `w×h` TestBackend and return its
-    /// rows as trimmed strings (the headless layout probe the dump scenarios use).
-    fn cockpit_rows(app: &mut AppState, w: u16, h: u16) -> Vec<String> {
+    /// Render the whole cockpit for `app` at `now_ms` into a `w×h` TestBackend and
+    /// return its rows as trimmed strings (the headless layout probe the dump
+    /// scenarios use). `now_ms` drives the animation clock (spinner frame, pet blink).
+    fn cockpit_rows_at(app: &mut AppState, w: u16, h: u16, now_ms: u64) -> Vec<String> {
         let theme = crate::theme::Theme::default_theme();
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         app.prepare_frame(ratatui::layout::Rect::new(0, 0, w, h), &theme);
-        term.draw(|f| render(f, app, &theme, 0)).unwrap();
+        term.draw(|f| render(f, app, &theme, now_ms)).unwrap();
         let buf = term.backend().buffer();
         (0..h as usize)
             .map(|y| {
@@ -218,6 +226,19 @@ mod tests {
                 row.trim_end().to_string()
             })
             .collect()
+    }
+
+    /// `cockpit_rows_at` at `now_ms=0` (the static-frame probe most tests want).
+    fn cockpit_rows(app: &mut AppState, w: u16, h: u16) -> Vec<String> {
+        cockpit_rows_at(app, w, h, 0)
+    }
+
+    /// The busy spinner status row — found by its `(` readout group + the gerund's
+    /// trailing `…` (stable across animated glyph frames; the done-line has neither).
+    fn find_spinner_row(rows: &[String]) -> &String {
+        rows.iter()
+            .find(|r| r.contains('…') && r.contains('('))
+            .expect("the busy spinner status row")
     }
 
     /// THE Q7 done-line deliverable: an idle cockpit right AFTER a turn shows the
@@ -235,6 +256,7 @@ mod tests {
         app.apply_bridge_event(
             BridgeEvent::Frame(CoreToUi::Status {
                 model: None,
+                llm: None, model_real: None,
                 context_percent: Some(48.0),
                 tokens: Some(1574),
                 input_tokens: Some(1234),
@@ -278,10 +300,12 @@ mod tests {
         );
     }
 
-    /// Drive a BUSY cockpit (turn open) with a seeded token snapshot and return
-    /// its rows — the shared setup for the Q9 spinner-glyph and Q4 live-token tests.
-    fn busy_spinner_rows(tok_in: u64, tok_out: u64) -> Vec<String> {
+    /// Drive a BUSY cockpit (turn open) at `now_ms` with a seeded token snapshot and
+    /// return its rows — the shared setup for the spinner-animation and live-token
+    /// tests. The pet is turned OFF so the spinner LEAD cell is the bare glyph.
+    fn busy_spinner_rows_at(tok_in: u64, tok_out: u64, now_ms: u64) -> Vec<String> {
         let mut app = AppState::new();
+        app.pet_style = PetStyle::Off;
         app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
         app.model = Some("m".into());
         app.apply_bridge_event(
@@ -291,6 +315,7 @@ mod tests {
         app.apply_bridge_event(
             BridgeEvent::Frame(CoreToUi::Status {
                 model: None,
+                llm: None, model_real: None,
                 context_percent: Some(48.0),
                 tokens: Some(tok_in + tok_out),
                 input_tokens: Some(tok_in),
@@ -303,77 +328,238 @@ mod tests {
             0,
         );
         assert!(app.busy, "the turn is still running");
-        cockpit_rows(&mut app, 100, 30)
+        cockpit_rows_at(&mut app, 100, 30, now_ms)
     }
 
-    /// Q9: the BUSY spinner glyph is the braille all-dots `⠿` (U+283F) — a static
-    /// completion-style mark, NOT the old arc set (no `◜◠◝◞◡◟`).
+    fn busy_spinner_rows(tok_in: u64, tok_out: u64) -> Vec<String> {
+        busy_spinner_rows_at(tok_in, tok_out, 0)
+    }
+
+    /// Slice 4: the BUSY spinner glyph ANIMATES — it cycles `spinner_style`'s frames
+    /// at the 0.1s tick, so the glyph at now_ms=0 (frame 0) DIFFERS from now_ms=300
+    /// (frame 3). The default style is braille (the tui_v3 soul), never the old arc.
     #[test]
-    fn spinner_emits_braille_all_dots() {
-        let rows = busy_spinner_rows(1234, 340);
-        let spinner = rows
-            .iter()
-            .find(|r| r.contains('⠿'))
-            .expect("the busy spinner row carries the `⠿` glyph");
-        assert_eq!('⠿' as u32, 0x283F, "the glyph is U+283F braille all-dots");
+    fn spinner_animates_braille_frames() {
+        let frames = SpinnerStyle::default().frames();
+        // The lead glyph is the first char of the gerund status row (pet is Off).
+        let glyph_at = |now_ms: u64| -> char {
+            let rows = busy_spinner_rows_at(1234, 340, now_ms);
+            find_spinner_row(&rows).chars().next().expect("a lead glyph")
+        };
+        let g0 = glyph_at(0);
+        let g3 = glyph_at(300);
+        assert!(frames.contains(&g0), "frame-0 glyph {g0:?} is from the style set");
+        assert!(frames.contains(&g3), "frame-3 glyph {g3:?} is from the style set");
+        assert_ne!(g0, g3, "the busy spinner glyph animates across ticks");
+        assert_eq!(g0, frames[0], "tick 0 → frame 0");
+        assert_eq!(g3, frames[3 % frames.len()], "tick 3 → frame 3");
         // The old arc frames must NOT appear anywhere in the busy chrome.
+        let rows = busy_spinner_rows_at(1234, 340, 0);
         for arc in ['◜', '◠', '◝', '◞', '◡', '◟'] {
-            assert!(
-                !rows.iter().any(|r| r.contains(arc)),
-                "no arc glyph {arc:?} in the spinner: {spinner:?}"
-            );
+            assert!(!rows.iter().any(|r| r.contains(arc)), "no arc glyph {arc:?} in the spinner");
         }
     }
 
-    /// Q4: the spinner's `↑in ↓out` readout reflects the LIVE token counts — a
-    /// later `Status` frame with different numbers changes what the row shows
-    /// (the spinner reads `app.tok_in/tok_out` directly, it does not cache them).
+    /// Slice 5: the spinner's `↓ <tokens> tokens` readout (CC's per-turn token arrow)
+    /// reflects the LIVE count — a later `Status` frame with a different total
+    /// changes what the row shows (the spinner reads `app.tokens` directly, it does
+    /// not cache it). The `↑in` / `ctx` parts are no longer on the spinner line.
     #[test]
     fn spinner_token_readout_reflects_live_counts() {
-        // Seeded 1234/340 → human-compacted to `1.2k`/`340` in the live readout.
+        // Seeded total 1234+340=1574 → human-compacted to `1.6k` after the `↓ `, with
+        // the trailing `tokens` word (Slice 11 wording).
         let rows = busy_spinner_rows(1234, 340);
-        let spinner = rows
-            .iter()
-            .find(|r| r.contains('⠿'))
-            .expect("busy spinner row");
-        assert!(spinner.contains("↑1.2k"), "input tokens live: {spinner:?}");
-        assert!(spinner.contains("↓340"), "output tokens live: {spinner:?}");
+        let spinner = find_spinner_row(&rows);
+        assert!(spinner.contains("↓ 1.6k tokens"), "live token total: {spinner:?}");
+        assert!(!spinner.contains('↑'), "no `↑in` on the spinner line: {spinner:?}");
 
         // A DIFFERENT Status snapshot yields a DIFFERENT readout (not cached).
         let rows2 = busy_spinner_rows(48_300, 12_900);
-        let spinner2 = rows2
-            .iter()
-            .find(|r| r.contains('⠿'))
-            .expect("busy spinner row");
-        assert!(spinner2.contains("↑48.3k"), "live input updates: {spinner2:?}");
-        assert!(spinner2.contains("↓12.9k"), "live output updates: {spinner2:?}");
-        assert_ne!(spinner, spinner2, "the readout tracks the live counts");
+        let spinner2 = find_spinner_row(&rows2);
+        assert!(spinner2.contains("↓ 61.2k tokens"), "live token total updates: {spinner2:?}");
+        assert_ne!(spinner, spinner2, "the readout tracks the live count");
     }
 
-    /// THE Q7 below-composer deliverable: exactly TWO rows under the composer — row1
-    /// runtime session info, row2 `⎿ <tip>` — and NO `❯ chat` anywhere.
+    /// Slice 4 session-info deliverable: with NO effort set the row shows the
+    /// non-thinking label (`非思考模式` in zh), `ctx 48%`, and the SAME wire identity
+    /// the header uses (`codex-pro` / `gpt-5.5`) — never the router name `MixinSession`.
     #[test]
-    fn below_composer_has_two_rows() {
+    fn session_info_shows_non_thinking_ctx_and_wire_identity() {
         let mut app = AppState::new();
-        app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
-        app.model = Some("m".into());
-        let (w, h) = (100u16, 30u16);
-        let rows = cockpit_rows(&mut app, w, h);
+        app.lang = crate::i18n::Lang::Zh;
+        app.conn = crate::app::ConnStatus::Connected { model: Some("MixinSession/codex-pro|gpt-5.2|kiro".into()) };
+        // The wire identity arrives via Ready/Status (Slice 1): llm=codex-pro,
+        // model_real=gpt-5.5; the router `model` stays the long MixinSession chain.
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Ready {
+                version: None,
+                model: Some("MixinSession/codex-pro|gpt-5.2|kiro".into()),
+                llm: Some("codex-pro".into()),
+                model_real: Some("gpt-5.5".into()),
+            }),
+            0,
+        );
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Status {
+                model: None,
+                llm: None, model_real: None,
+                context_percent: Some(48.0),
+                tokens: Some(100),
+                input_tokens: Some(60),
+                output_tokens: Some(40),
+                cache_tokens: None,
+                last_input: Some(60),
+                last_output: Some(40),
+                text: None,
+            }),
+            0,
+        );
+        assert!(app.effort_label().is_none(), "no effort set");
 
-        // The composer's bottom border is the `╰` row; the two rows AFTER it are the
-        // session info (row1) and the `⎿` tip (row2) — and they are the LAST two rows.
+        let rows = cockpit_rows(&mut app, 100, 30);
+        let info = rows
+            .iter()
+            .find(|r| r.contains("ctx 48%"))
+            .expect("the session-info row carries ctx 48%");
+        // The TestBackend grid renders each wide CJK glyph into 2 cells, so the
+        // cell-by-cell row join interleaves spaces (`非 思 考…`); compare the zh
+        // label against a space-stripped form. ASCII tokens stay contiguous.
+        let dense: String = info.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(dense.contains("非思考模式"), "non-thinking label (zh): {info:?}");
+        assert!(info.contains("codex-pro"), "wire llm identity: {info:?}");
+        assert!(info.contains("gpt-5.5"), "wire model identity: {info:?}");
+        assert!(!info.contains("MixinSession"), "router name is NOT shown: {info:?}");
+    }
+
+    /// Slice 5 layout INVERSION (was `below_composer_has_two_rows`): the `⎿ Tip`
+    /// hangs as a corner-continuation directly UNDER the busy spinner status line
+    /// (above the composer), so below the composer there is now exactly ONE row
+    /// (session info). IDLE keeps the historical two-row below-composer layout.
+    #[test]
+    fn busy_tip_under_spinner_one_row_below_composer() {
+        // BUSY: spinner band on, the `⎿` Tip is its very next row (above composer).
+        let rows = busy_spinner_rows(1234, 340);
+        let spinner_idx = rows
+            .iter()
+            .position(|r| r.contains('…') && r.contains('('))
+            .expect("the spinner status row");
+        let tip = &rows[spinner_idx + 1];
+        assert!(tip.starts_with("⎿ "), "the row under the spinner is the `⎿ ` tip: {tip:?}");
+
+        // The Tip is ABOVE the composer (its bottom `╰` border comes after it), and
+        // below the composer there is exactly ONE row (session info).
         let bottom = rows
             .iter()
             .rposition(|r| r.starts_with('╰'))
             .expect("the composer has a bottom border");
-        assert_eq!(bottom + 3, rows.len(), "exactly two rows follow the composer");
-        let row2 = &rows[bottom + 2];
-        assert!(row2.starts_with("⎿ "), "row2 is the `⎿ ` tip line: {row2:?}");
-        // The old `❯ chat` footer eyesore is gone (Q7).
+        assert!(spinner_idx + 1 < bottom, "the `⎿` tip sits above the composer");
+        assert_eq!(bottom + 2, rows.len(), "exactly ONE row follows the composer while busy");
+        // The sole below-composer row is the session info, NOT a second `⎿` tip.
+        assert!(!rows[bottom + 1].starts_with("⎿ "), "no detached below-composer tip while busy");
         assert!(
             !rows.iter().any(|r| r.contains("❯ chat")),
             "no `❯ chat` anywhere in the chrome"
         );
+
+        // IDLE: the Tip returns to its row2 below-composer slot (two rows below).
+        let mut idle = AppState::new();
+        idle.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
+        idle.model = Some("m".into());
+        let idle_rows = cockpit_rows(&mut idle, 100, 30);
+        let idle_bottom = idle_rows
+            .iter()
+            .rposition(|r| r.starts_with('╰'))
+            .expect("the composer has a bottom border");
+        assert_eq!(idle_bottom + 3, idle_rows.len(), "two rows follow the composer when idle");
+        assert!(idle_rows[idle_bottom + 2].starts_with("⎿ "), "row2 is the `⎿ ` tip when idle");
+    }
+
+    /// Slice 5 HONEST CHECK: the busy spinner status row matches CC's
+    /// `<glyph> <Gerund>… (<elapsed> · ↓<tokens> · thinking <effort>)` shape, with
+    /// the effort rendered as a "thinking …" phrase. With `max` effort set it reads
+    /// "thinking with max effort"; the down-arrow tokens and elapsed are present.
+    #[test]
+    fn spinner_status_line_shape_with_thinking_effort() {
+        use crate::app::effort::ReasoningEffort;
+        let mut app = AppState::new();
+        app.pet_style = PetStyle::Off;
+        app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
+        app.model = Some("m".into());
+        app.set_reasoning_effort(ReasoningEffort::Max);
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }),
+            0,
+        );
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Status {
+                model: None,
+                llm: None, model_real: None,
+                context_percent: Some(48.0),
+                tokens: Some(1574),
+                input_tokens: Some(1234),
+                output_tokens: Some(340),
+                cache_tokens: None,
+                last_input: Some(1234),
+                last_output: Some(340),
+                text: None,
+            }),
+            0,
+        );
+        let rows = cockpit_rows(&mut app, 100, 30);
+        let spinner = find_spinner_row(&rows);
+
+        // Shape: an open paren, a `·`-separated `↓<tokens>`, and the "thinking …"
+        // phrase, all inside the `(…)` group.
+        assert!(spinner.contains('('), "status group opens with `(`: {spinner:?}");
+        assert!(spinner.contains("0.0s"), "elapsed is present: {spinner:?}");
+        assert!(spinner.contains("· ↓ 1.6k tokens"), "down-arrow token total: {spinner:?}");
+        assert!(spinner.contains("· thinking with max effort"), "thinking phrase: {spinner:?}");
+        assert!(spinner.trim_end().ends_with(')'), "status group closes with `)`: {spinner:?}");
+        // No ctx bar / `↑in` on the spinner line (moved off per Slice 5).
+        assert!(!spinner.contains('↑'), "no `↑in`: {spinner:?}");
+        assert!(!spinner.contains('▰') && !spinner.contains('▱'), "no ctx bar: {spinner:?}");
+
+        // The next row is the hanging `⎿ ` tip continuation.
+        let idx = rows.iter().position(|r| r.contains('…') && r.contains('(')).unwrap();
+        assert!(rows[idx + 1].starts_with("⎿ "), "next row is the `⎿ ` tip: {:?}", rows[idx + 1]);
+    }
+
+    /// Slice 5 width-gating (R5): on a NARROW terminal the tokens part drops FIRST,
+    /// but the gerund + elapsed + "thinking …" phrase stay legible.
+    #[test]
+    fn spinner_width_gating_drops_tokens_first() {
+        use crate::app::effort::ReasoningEffort;
+        let mut app = AppState::new();
+        app.pet_style = PetStyle::Off;
+        app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
+        app.model = Some("m".into());
+        app.set_reasoning_effort(ReasoningEffort::Max);
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }),
+            0,
+        );
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Status {
+                model: None,
+                llm: None, model_real: None,
+                context_percent: Some(48.0),
+                tokens: Some(1574),
+                input_tokens: Some(1234),
+                output_tokens: Some(340),
+                cache_tokens: None,
+                last_input: Some(1234),
+                last_output: Some(340),
+                text: None,
+            }),
+            0,
+        );
+        // 36-wide: too narrow for `… (0.0s · ↓1.6k · thinking with max effort)` in
+        // full, so the tokens part is dropped but the thinking phrase remains.
+        let rows = cockpit_rows(&mut app, 36, 12);
+        let spinner = find_spinner_row(&rows);
+        assert!(!spinner.contains("↓"), "tokens part dropped on narrow: {spinner:?}");
+        assert!(spinner.contains("0.0s"), "elapsed kept on narrow: {spinner:?}");
+        assert!(spinner.contains("thinking"), "thinking phrase kept on narrow: {spinner:?}");
     }
 
     /// N1 survives the footer removal: when the bridge is DISCONNECTED the

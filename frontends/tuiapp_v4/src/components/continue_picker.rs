@@ -39,6 +39,14 @@ pub const GREP_WIN: usize = 1024 * 1024;
 /// `continue_cmd._PREVIEW_WIN` (32 KiB).
 pub const PREVIEW_WIN: usize = 32 * 1024;
 
+/// Debounce for the LAZY content grep, in 0.1s event-loop ticks (`app.tick()`).
+/// Mirrors v2's `DEBOUNCE_SEC = 0.22` (`tuiapp_v2.py:1515`): per-keystroke the
+/// cheap META filter applies immediately, but the ≤1 MiB×N-session content grep
+/// only runs after the user pauses this many ticks — so fast typing never blocks
+/// on disk. 2 ticks ≈ 0.2s, the same feel without a wall clock (the codebase
+/// drives all timing off the integer tick for determinism).
+pub const GREP_DEBOUNCE_TICKS: u64 = 2;
+
 /// One past session row: the log path + its metadata for the picker. PURE data;
 /// the heavy file scan that builds it is in [`list_sessions`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,8 +72,9 @@ impl ContinueSession {
 }
 
 /// The `/continue` overlay: the (newest-first) session list, a search buffer, the
-/// FILTERED view + selection. Typing edits `query`; the filtered indices recompute
-/// against `sessions` via the lazy content-grep; Enter restores the selected log.
+/// FILTERED view + selection. Typing edits `query` and applies the cheap META
+/// filter at once; the LAZY content grep runs on a later tick once typing pauses
+/// (see [`GREP_DEBOUNCE_TICKS`]); Enter restores the selected log.
 #[derive(Debug, Clone)]
 pub struct ContinuePicker {
     /// All discovered sessions, newest-first (the unfiltered universe).
@@ -76,6 +85,10 @@ pub struct ContinuePicker {
     pub filtered: Vec<usize>,
     /// The highlighted row, indexing `filtered`.
     pub sel: usize,
+    /// The event-loop tick at which the deferred content grep should fire, or
+    /// `None` when the live `filtered` already reflects a content grep (or the
+    /// query is empty). Stamped on each keystroke; consumed by [`Self::tick`].
+    grep_at: Option<u64>,
 }
 
 impl ContinuePicker {
@@ -83,7 +96,7 @@ impl ContinuePicker {
     /// starts empty (all sessions shown), selection at the top.
     pub fn new(sessions: Vec<ContinueSession>) -> Self {
         let filtered = (0..sessions.len()).collect();
-        ContinuePicker { sessions, query: String::new(), filtered, sel: 0 }
+        ContinuePicker { sessions, query: String::new(), filtered, sel: 0, grep_at: None }
     }
 
     /// True if there are NO sessions at all to continue (the empty-state).
@@ -112,28 +125,58 @@ impl ContinuePicker {
         self.sel = crate::commands::registry::move_sel(self.sel, delta, self.filtered.len());
     }
 
-    /// Type a char into the search buffer + re-filter (lazy content-grep). The
-    /// selection re-clamps to the new match count. `read_head` lazily yields a
-    /// file's head window (only invoked for sessions whose meta doesn't already
-    /// match) so a real call passes a disk reader and a test passes a fake.
-    pub fn type_char(&mut self, c: char, read_head: impl Fn(&Path) -> Option<Vec<u8>>) {
+    /// Type a char into the search buffer. Applies the cheap META filter NOW and
+    /// arms the deferred content grep (see [`Self::edit_at`]).
+    pub fn type_char(&mut self, c: char, now_tick: u64) {
         self.query.push(c);
-        self.refilter(read_head);
+        self.edit_at(now_tick);
     }
 
-    /// Backspace the search buffer + re-filter.
-    pub fn backspace(&mut self, read_head: impl Fn(&Path) -> Option<Vec<u8>>) {
+    /// Backspace the search buffer (same two-stage behavior as [`Self::type_char`]).
+    pub fn backspace(&mut self, now_tick: u64) {
         self.query.pop();
-        self.refilter(read_head);
+        self.edit_at(now_tick);
     }
 
-    /// Recompute `filtered` against the current `query` and re-clamp the selection.
-    /// PURE-ish (the only effect is the injected `read_head`, used lazily).
-    pub fn refilter(&mut self, read_head: impl Fn(&Path) -> Option<Vec<u8>>) {
-        self.filtered = filter_sessions(&self.query, &self.sessions, &read_head);
+    /// React to a query edit at `now_tick`: re-filter on META ONLY (basename +
+    /// preview, no disk I/O) so the list updates instantly, then arm the lazy
+    /// content grep for `now_tick + GREP_DEBOUNCE_TICKS`. An empty query needs no
+    /// grep, so it disarms. Cancelling a prior pending grep is implicit — the new
+    /// `grep_at` overwrites the old, so only the latest prefix is ever grepped
+    /// (v2's "last input wins", `tuiapp_v2.py:1522-1541`).
+    fn edit_at(&mut self, now_tick: u64) {
+        self.filtered = filter_meta_only(&self.query, &self.sessions);
+        self.clamp_sel();
+        self.grep_at =
+            if self.query.trim().is_empty() { None } else { Some(now_tick + GREP_DEBOUNCE_TICKS) };
+    }
+
+    /// Drive the debounce from the event loop's 0.1s tick. When a deferred grep is
+    /// armed and `now_tick` has reached it, run the FULL filter (META + lazy
+    /// content grep) and disarm. A no-op until the debounce window elapses, so
+    /// fast typing only ever pays the cheap META filter. `read_head` lazily yields
+    /// a file's head window (only for sessions whose meta didn't already match), so
+    /// a real call passes a disk reader and a test passes a fake.
+    pub fn tick(&mut self, now_tick: u64, read_head: impl Fn(&Path) -> Option<Vec<u8>>) {
+        if self.grep_at.is_some_and(|due| now_tick >= due) {
+            self.grep_at = None;
+            self.filtered = filter_sessions(&self.query, &self.sessions, &read_head);
+            self.clamp_sel();
+        }
+    }
+
+    /// Re-clamp the selection into the current match set.
+    fn clamp_sel(&mut self) {
         if self.sel >= self.filtered.len() {
             self.sel = self.filtered.len().saturating_sub(1);
         }
+    }
+
+    /// True iff a deferred content grep is still pending (the live `filtered` is
+    /// META-only). Drives the renderer's "searching…" affordance + lets a test
+    /// assert the two-stage behavior.
+    pub fn grep_pending(&self) -> bool {
+        self.grep_at.is_some()
     }
 
     /// The visible window `(start, slice_of_filtered_indices)` for the scroll
@@ -167,8 +210,7 @@ pub fn filter_sessions(
     let mut out = Vec::new();
     for (i, s) in sessions.iter().enumerate() {
         // 1. Cheap META match (basename + preview), no I/O.
-        let meta = format!("{}\n{}", s.basename(), s.preview).to_lowercase();
-        if terms.iter().all(|t| meta.contains(t)) {
+        if meta_matches(s, &terms) {
             out.push(i);
             continue;
         }
@@ -180,6 +222,54 @@ pub fn filter_sessions(
         }
     }
     out
+}
+
+/// Filter `sessions` on META ONLY (basename + preview), never touching disk — the
+/// immediate, per-keystroke half of the two-stage filter. The lazy content grep is
+/// [`filter_sessions`], deferred to a tick after typing pauses. Same AND-term,
+/// case-insensitive, order-preserving rule as the meta branch of `filter_sessions`.
+pub fn filter_meta_only(query: &str, sessions: &[ContinueSession]) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return (0..sessions.len()).collect();
+    }
+    let terms: Vec<String> = q.split_whitespace().map(|t| t.to_string()).collect();
+    if terms.is_empty() {
+        return (0..sessions.len()).collect();
+    }
+    sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| meta_matches(s, &terms))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// True iff a session's META (basename + preview) contains EVERY term. PURE, no I/O.
+fn meta_matches(s: &ContinueSession, terms: &[String]) -> bool {
+    let meta = format!("{}\n{}", s.basename(), s.preview).to_lowercase();
+    terms.iter().all(|t| meta.contains(t))
+}
+
+/// A coarse relative-age label for a session's mtime ("just now / 5m / 3h / 2d"),
+/// `now_secs` = wall-clock seconds. Ports `continue_cmd._rel_time`
+/// (`continue_cmd.py:17-22`) with the same <60s / <1h / <1d / day buckets. PURE.
+pub fn rel_age(mtime: u64, now_secs: u64) -> String {
+    let d = now_secs.saturating_sub(mtime);
+    if d < 60 {
+        i18n_age_now()
+    } else if d < 3600 {
+        format!("{}m", d / 60)
+    } else if d < 86400 {
+        format!("{}h", d / 3600)
+    } else {
+        format!("{}d", d / 86400)
+    }
+}
+
+/// The "<1 minute" age label, factored so the unit boundary is named once.
+fn i18n_age_now() -> String {
+    "just now".to_string()
 }
 
 /// True iff the (lowercased) `bytes` contain EVERY term (case-insensitive). Mirrors
@@ -341,6 +431,16 @@ fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Wall-clock seconds since the UNIX epoch (0 if the clock is pre-epoch). The one
+/// impurity behind the relative-age column — read at the render call boundary so
+/// [`render`] itself stays a pure function of an injected `now_secs`. Effectful.
+pub fn wall_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// A disk reader for the lazy content-grep: the head window (≤ [`GREP_WIN`]) of a
 /// file, or `None` on error. The live picker passes this to `refilter`; tests pass
 /// a fake map. Effectful.
@@ -357,8 +457,17 @@ pub fn read_head_window(path: &Path) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Draw the `/continue` searchable picker: a search box at the top, then the
-/// filtered, scrolling session list. Centered, bordered, theme-tokened.
-pub fn render(frame: &mut Frame, area: Rect, picker: &ContinuePicker, theme: &Theme, lang: Lang) {
+/// filtered, scrolling session list. Centered, bordered, theme-tokened. `now_secs`
+/// is wall-clock seconds (for the per-row relative-age prefix) — injected so the
+/// renderer stays a PURE function of its inputs.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &ContinuePicker,
+    theme: &Theme,
+    lang: Lang,
+    now_secs: u64,
+) {
     let w = (area.width.saturating_sub(6)).clamp(40, 96);
     let visible = picker.matches().min(PICKER_ROWS);
     let h = (visible as u16 + 6).min(area.height.saturating_sub(2)).max(8);
@@ -393,6 +502,14 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &ContinuePicker, theme: &Th
         ));
     }
     search.push(Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)));
+    // A deferred content grep is in flight (typing only applied the META filter) →
+    // hint it so the user knows more matches may land after the debounce.
+    if picker.grep_pending() {
+        search.push(Span::styled(
+            i18n::t(lang, "continue.searching"),
+            Style::default().fg(theme.color(Token::Dim)),
+        ));
+    }
     lines.push(Line::from(search));
     lines.push(Line::from(""));
 
@@ -415,12 +532,13 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &ContinuePicker, theme: &Th
                 if selected { "❯ " } else { "  " },
                 Style::default().fg(theme.color(Token::Suggestion)),
             )];
-            // round count + preview (preview clipped to fit).
-            spans.push(Span::styled(
-                format!("[{}{}] ", s.rounds, rounds_suffix(lang)),
-                Style::default().fg(theme.color(Token::Dim)),
-            ));
-            let preview_w = inner_w.saturating_sub(14);
+            // Relative-age prefix (dim), then round count + preview (clipped to fit).
+            let age = format!("{} · ", rel_age(s.mtime, now_secs));
+            spans.push(Span::styled(age.clone(), Style::default().fg(theme.color(Token::Dim))));
+            let rounds = format!("[{}{}] ", s.rounds, rounds_suffix(lang));
+            spans.push(Span::styled(rounds.clone(), Style::default().fg(theme.color(Token::Dim))));
+            let prefix_w = 2 + age.chars().count() + rounds.chars().count();
+            let preview_w = inner_w.saturating_sub(prefix_w);
             spans.push(Span::styled(
                 super::clip_to(&s.preview, preview_w),
                 Style::default()
@@ -510,26 +628,95 @@ mod tests {
         // A term present in NO session → empty.
         assert!(filter_sessions("nonexistent-term-xyz", &sessions, &read_head).is_empty());
 
-        // 5. The picker integrates it: typing narrows + re-clamps the selection.
+        // 5. The picker integrates it: typing narrows on META immediately + re-clamps
+        // the selection. (The two-stage debounce is asserted in its own test below.)
         let mut p = ContinuePicker::new(sessions.clone());
         assert_eq!(p.matches(), 3);
         p.sel = 2; // select the last row.
-        // Type "login" → only session 222 matches; selection re-clamps to 0.
+        // Type "login" → only session 222 matches via META; selection re-clamps to 0.
         for c in "login".chars() {
-            p.type_char(c, &read_head);
+            p.type_char(c, 0);
         }
         assert_eq!(p.matches(), 1);
         assert_eq!(p.sel, 0);
         assert_eq!(p.selected().unwrap().preview, "fix the login bug");
         assert_eq!(p.selected_path().as_deref(), Some("/temp/model_responses/model_responses_222.txt"));
         // Backspacing widens the match set again.
-        p.backspace(&read_head); // "logi"
+        p.backspace(0); // "logi"
         // "logi" still only matches 222's preview ("login").
         assert_eq!(p.matches(), 1);
         while !p.query.is_empty() {
-            p.backspace(&read_head);
+            p.backspace(0);
         }
         assert_eq!(p.matches(), 3, "clearing the query restores all sessions");
+    }
+
+    /// THE Slice-9 deliverable: the filter is TWO-STAGE. A keystroke applies the
+    /// cheap META filter at once (basename/preview, no disk), while a BODY-only term
+    /// matches NOTHING until the debounced content grep fires on a later `tick()`
+    /// (past `GREP_DEBOUNCE_TICKS`). Cancelling: a fresh keystroke re-arms the timer,
+    /// so an early tick never greps a prefix the user moved past.
+    #[test]
+    fn continue_grep_is_debounced_two_stage() {
+        let sessions = vec![
+            sess("model_responses_111.txt", 300, "refactor the parser", 4),
+            sess("model_responses_222.txt", 200, "fix the login bug", 7),
+            sess("model_responses_333.txt", 100, "write release notes", 2),
+        ];
+        // Track every disk read so we can prove the grep does NOT run per keystroke.
+        let reads = std::cell::RefCell::new(0usize);
+        let read_head = |p: &Path| -> Option<Vec<u8>> {
+            *reads.borrow_mut() += 1;
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            // "kubernetes" lives ONLY in 333's body, not its preview/basename.
+            let body = if name == "model_responses_333.txt" {
+                "=== Prompt ===\nwrite release notes\ndeploy to kubernetes"
+            } else {
+                "=== Prompt ===\nother"
+            };
+            Some(body.as_bytes().to_vec())
+        };
+
+        let mut p = ContinuePicker::new(sessions);
+        // Type a BODY-only term at tick 10.
+        for c in "kubernetes".chars() {
+            p.type_char(c, 10);
+        }
+        // STAGE 1 (immediate): META-only → no match yet, and crucially NO disk read.
+        assert_eq!(p.matches(), 0, "body-only term has no META match before the grep");
+        assert!(p.grep_pending(), "a content grep is armed after typing");
+        assert_eq!(*reads.borrow(), 0, "typing must not touch disk");
+
+        // A tick BEFORE the debounce window elapses does nothing (still no grep).
+        p.tick(11, &read_head);
+        assert_eq!(p.matches(), 0, "grep must not fire before GREP_DEBOUNCE_TICKS");
+        assert!(p.grep_pending());
+        assert_eq!(*reads.borrow(), 0);
+
+        // STAGE 2 (deferred): once now_tick >= edit_tick + GREP_DEBOUNCE_TICKS, the
+        // content grep runs and finds 333 via its body.
+        p.tick(10 + GREP_DEBOUNCE_TICKS, &read_head);
+        assert!(!p.grep_pending(), "the grep fired and disarmed");
+        assert!(*reads.borrow() > 0, "the deferred grep read the head window");
+        assert_eq!(p.filtered, vec![2], "body-only 'kubernetes' matches session 333");
+
+        // A later tick with nothing armed is a no-op (no extra reads).
+        let before = *reads.borrow();
+        p.tick(99, &read_head);
+        assert_eq!(*reads.borrow(), before, "an idle tick performs no work");
+    }
+
+    /// `rel_age` ports `continue_cmd._rel_time`: <60s "just now", then m / h / d
+    /// buckets; a future mtime saturates to "just now". PURE.
+    #[test]
+    fn rel_age_buckets() {
+        let now = 1_000_000u64;
+        assert_eq!(rel_age(now, now), "just now");
+        assert_eq!(rel_age(now - 59, now), "just now");
+        assert_eq!(rel_age(now - 300, now), "5m");
+        assert_eq!(rel_age(now - 3 * 3600, now), "3h");
+        assert_eq!(rel_age(now - 2 * 86400, now), "2d");
+        assert_eq!(rel_age(now + 50, now), "just now", "future mtime saturates");
     }
 
     /// The preview extractor prefers a trailing `<summary>`, else the first real
@@ -559,21 +746,25 @@ mod tests {
         assert!(!bytes_contain_all(b"", &terms));
     }
 
-    /// The renderer paints the search box + a row to an in-memory backend.
+    /// The renderer paints the search box + a row to an in-memory backend, and each
+    /// row carries the relative-age prefix (port of v2's `_rel_time` column).
     #[test]
     fn continue_renders_search_and_rows() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let theme = Theme::default_theme();
+        // mtime 2h before the injected `now_secs` → the row prefix reads "2h".
+        let now_secs = 1_000_000u64;
         let p = ContinuePicker::new(vec![
-            sess("model_responses_111.txt", 300, "refactor the parser", 4),
+            sess("model_responses_111.txt", now_secs - 2 * 3600, "refactor the parser", 4),
         ]);
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| render(f, f.area(), &p, &theme, Lang::En)).unwrap();
+        term.draw(|f| render(f, f.area(), &p, &theme, Lang::En, now_secs)).unwrap();
         let buf = term.backend().buffer();
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("Continue"), "paints the title");
         assert!(text.contains("refactor the parser"), "paints a session row");
+        assert!(text.contains("2h ·"), "each row carries a relative-age prefix");
     }
 }

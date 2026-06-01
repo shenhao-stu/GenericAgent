@@ -90,12 +90,12 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd("restore", "restore last model_responses into history", App),
     cmd("reload-keys", "hot-reload mykey.py", App),
     cmd("language", "switch interface language + repaint", Ui),
-    cmd("emoji", "pet / spinner style", Ui),
+    cmd("pets", "pet style", Ui),
+    alias("emoji", "pet style", Ui, "pets"),
     cmd("effort", "reasoning-effort slider (low…max)", Ui),
     cmd("verbose", "full-screen tool-call audit", Ui),
     alias("tools", "full-screen tool-call audit", Ui, "verbose"),
     alias("trace", "full-screen tool-call audit", Ui, "verbose"),
-    cmd("effects", "effects intensity + demo splash", App),
     cmd("fold", "fold / unfold all completed tool chips", App),
     cmd("theme", "theme picker with live preview", Ui),
     cmd("quit", "quit tui_v4", App),
@@ -323,8 +323,8 @@ mod tests {
             "help", "keybindings", "status", "sessions", "new", "switch", "close", "rename", "branch",
             "rewind", "clear", "stop", "abort", "llm", "btw", "review", "update", "autorun",
             "morphling", "goal", "hive", "conductor", "workflows", "scheduler", "continue", "resume",
-            "cost", "export", "restore", "reload-keys", "language", "emoji", "effort", "verbose",
-            "tools", "trace", "effects", "fold", "theme", "quit", "exit",
+            "cost", "export", "restore", "reload-keys", "language", "pets", "emoji", "effort", "verbose",
+            "tools", "trace", "fold", "theme", "quit", "exit",
         ];
         for name in all {
             let c = resolve(name).unwrap_or_else(|| panic!("/{name} must resolve"));
@@ -335,7 +335,8 @@ mod tests {
             // Resolution survives glued-on args (the dispatcher may pass the head).
             assert!(resolve(&format!("{name} some args")).is_some(), "/{name} resolves with args");
         }
-        // The §4 spec says ~33; the union with the 5 marked aliases is 41.
+        // The §4 spec says ~33; the union with the 6 marked aliases is 41 (`/effects`
+        // was removed in Slice 7 — its effects ENGINE stays, the COMMAND is gone).
         assert_eq!(COMMANDS.len(), all.len());
         assert!(COMMANDS.len() >= 33, "expected ~33+ commands, got {}", COMMANDS.len());
 
@@ -350,21 +351,32 @@ mod tests {
         assert!(resolve("definitely-not-a-command").is_none());
         assert!(resolve("").is_none());
         assert!(resolve("/").is_none());
+
+        // Slice 7: `/effects` (the COMMAND) was removed — it no longer resolves and is
+        // gone from COMMANDS + the palette (the effects ENGINE keeps running on its own).
+        assert!(resolve("effects").is_none(), "/effects no longer resolves");
+        assert!(resolve("/effects").is_none(), "/effects (with slash) no longer resolves");
+        assert!(!COMMANDS.iter().any(|c| c.name == "effects"), "/effects is gone from COMMANDS");
+        assert!(
+            !palette_matches("/effects").iter().any(|c| c.name == "effects"),
+            "/effects does not surface in the palette"
+        );
     }
 
-    /// Q6 — the 5 alias commands are MARKED (`alias_of`) at their primary, still
+    /// Q6 — the marked alias commands are MARKED (`alias_of`) at their primary, still
     /// RESOLVE (so the typed alias keeps working), but the palette does not surface
     /// an alias AND its primary as two competing rows (dedup), and each primary they
     /// point at exists. This is the "no duplicate primary name; aliases still work"
     /// resolution of the C3-dedup / C5-D7 specs.
     #[test]
     fn aliases_marked_not_duplicated() {
-        // Exactly these 5 aliases, each pointing at its primary.
+        // Exactly these aliases, each pointing at its primary (`/emoji`→`/pets`, Slice 6).
         let expected = [
             ("sessions", "status"),
             ("abort", "stop"),
             ("tools", "verbose"),
             ("trace", "verbose"),
+            ("emoji", "pets"),
             ("exit", "quit"),
         ];
         for (a, primary) in expected {
@@ -376,7 +388,7 @@ mod tests {
         }
         // Those are the ONLY aliases — nothing else carries `alias_of`.
         let marked: Vec<&str> = COMMANDS.iter().filter(|c| c.alias_of.is_some()).map(|c| c.name).collect();
-        assert_eq!(marked.len(), expected.len(), "exactly 5 aliases marked, got {marked:?}");
+        assert_eq!(marked.len(), expected.len(), "exactly {} aliases marked, got {marked:?}", expected.len());
 
         // DEDUP: typing a prefix that hits BOTH an alias and its primary surfaces
         // the PRIMARY only — `/verbose` is present, neither `tools` nor `trace`
@@ -404,9 +416,10 @@ mod tests {
         assert!(alias_only.iter().any(|c| c.name == "abort"), "/abort still completes alone");
     }
 
-    /// Q10 — `/mouse` was removed from the registry (mouse capture defaults OFF for
-    /// native drag-select; the `Ctrl+Shift+M` chord is the wheel-scroll opt-in). It
-    /// must NOT resolve and must NOT appear in the palette.
+    /// Q10 — `/mouse` was removed from the registry; the `Ctrl+Shift+M` chord is the
+    /// live capture toggle (capture defaults ON for wheel scroll → the chord is the
+    /// opt-OUT into native drag-select). `/mouse` must NOT resolve or surface in the
+    /// palette.
     #[test]
     fn mouse_command_removed() {
         assert!(resolve("mouse").is_none(), "/mouse is no longer a command");

@@ -381,7 +381,11 @@ class Bridge:
             self.emit_error("no LLM configured (check mykey.py)", code="no_llm", fatal=False)
             self.emit({"type": "Ready", "version": PROTOCOL_VERSION})
             return True
-        self.emit({"type": "Ready", "version": PROTOCOL_VERSION, "model": model})
+        # `model` stays the legacy SessionType/chain string (back-compat); the
+        # additive `llm`/`model_real` carry the active config name + real model.
+        name, real = self.llm_identity()
+        self.emit({"type": "Ready", "version": PROTOCOL_VERSION, "model": model,
+                   "llm": name, "model_real": real})
         return True
 
     def _run_safe(self):
@@ -402,6 +406,24 @@ class Bridge:
         except Exception:
             return "?"
 
+    def llm_identity(self):
+        """(active config NAME, real underlying model) for the header.
+
+        Reads the ACTIVE member of a MixinSession by `_cur_idx` (so a mid-turn
+        failover follows the live member); a scalar backend degrades to itself.
+        Strips a trailing `[...]` context-window tag (`claude-opus-4-8[1m]` ->
+        `claude-opus-4-8`). Falls back to ('?','?') so the wire never breaks.
+        """
+        try:
+            b = getattr(self._agent.llmclient, "backend", None)
+            sub = b._sessions[b._cur_idx] if hasattr(b, "_sessions") else b
+            name = _bound(getattr(sub, "name", "") or "", 128)
+            model = _bound(getattr(sub, "model", "") or "", 128)
+            model = model.split("[", 1)[0].strip()
+            return (name or "?", model or name or "?")
+        except Exception:
+            return ("?", "?")
+
     def _status_payload(self):
         """Build a Status frame: model + cumulative token totals + context %.
 
@@ -414,7 +436,8 @@ class Bridge:
         compares the backend's char-history against context_win*3 (the trim unit).
         Best-effort: any failure degrades to a model-only frame (wire never breaks).
         """
-        frame = {"type": "Status", "model": self.llm_name()}
+        name, real = self.llm_identity()
+        frame = {"type": "Status", "model": self.llm_name(), "llm": name, "model_real": real}
         ct = self._cost_tracker
         if ct is None:
             return frame

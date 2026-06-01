@@ -23,6 +23,7 @@ impl AppState {
         let transcript = self.transcript.clone();
         let conn = self.conn.clone();
         let model = self.model.clone();
+        let context_percent = self.context_percent;
         let busy = self.busy;
         let busy_since = self.turn_started_ms;
         let pending = self.pending_ask.clone();
@@ -34,6 +35,7 @@ impl AppState {
             s.transcript = transcript;
             s.conn = conn;
             s.model = model;
+            s.context_percent = context_percent;
             s.busy = busy;
             s.busy_since_ms = busy_since;
             s.pending_ask = pending;
@@ -52,6 +54,7 @@ impl AppState {
         self.transcript = s.transcript.clone();
         self.conn = s.conn.clone();
         self.model = s.model.clone();
+        self.context_percent = s.context_percent;
         self.busy = s.busy;
         self.turn_started_ms = s.busy_since_ms;
         self.pending_ask = s.pending_ask.clone();

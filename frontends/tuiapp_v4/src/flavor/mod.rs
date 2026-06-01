@@ -2,9 +2,9 @@
 //! the 34-word gerund pool, pet faces (5 styles × 4 heat × 4 frames), rotating
 //! tips, and the OSC0/OSC-21337 terminal-title/tab-status payloads.
 //!
-//! IDENTITY: this is NOT Claude Code's `✻`/`✷`. The default is the arc cycle
-//! `◜◠◝◞◡◟`; a braille set `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` (the tui_v3 soul) and a pulse set
-//! `·✢✳✶✻✽` are the alternates. As a turn runs longer the spinner color
+//! IDENTITY: this is NOT Claude Code's `✻`/`✷`. The default is the braille set
+//! `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` (the tui_v3 soul, rhyming with the `⠿` done-glyph); an arc cycle
+//! `◜◠◝◞◡◟` and a pulse set `·✢✳✶✻✽` are the alternates. As a turn runs longer the spinner color
 //! escalates through the "patience heat" ramp (mint <20s, amber <60s, orange
 //! <180s, red ≥180s) returned as a THEME TOKEN (no hardcoded color).
 //!
@@ -16,16 +16,17 @@
 
 use crate::theme::Token;
 
-/// The selectable spinner aesthetics. Default = [`SpinnerStyle::Arc`] (our
-/// distinct mark, never the CC asterisk). Switched via the `/emoji`-style picker.
-// Braille/Pulse + the name pickers are selected by the Phase-3 `/emoji` overlay.
+/// The spinner aesthetics. Default = [`SpinnerStyle::Braille`] (the tui_v3 soul,
+/// never the CC asterisk). Slice 6 dropped the user-facing picker — the style is a
+/// code default now; the variants/parsers stay for tests + a future switch.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpinnerStyle {
-    /// `◜◠◝◞◡◟` — the distinct tui_v4 arc (default; NOT the CC asterisk).
-    #[default]
+    /// `◜◠◝◞◡◟` — the distinct tui_v4 arc (NOT the CC asterisk).
     Arc,
-    /// `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` — the tui_v3 braille soul.
+    /// `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` — the tui_v3 braille soul. DEFAULT: the busy frames rhyme
+    /// with the `⠿` all-dots glyph the done-line settles on (Slice 4).
+    #[default]
     Braille,
     /// `·✢✳✶✻✽` — pulse (in/out), the alternate aesthetic.
     Pulse,
@@ -283,12 +284,15 @@ pub fn gerund(lang: Lang, tick: u64) -> &'static str {
 // plus a 5th "fox" style to reach the spec's 5-style requirement).
 // ---------------------------------------------------------------------------
 
-/// The selectable pet styles (the `/emoji` faces). `Off` hides the pet.
+/// The selectable pet styles (the `/pets` faces). `Off` hides the pet.
 // All 5 styles ship; the non-default ones are chosen via the Phase-3 picker.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PetStyle {
-    /// `ʕ•ᴥ•ʔ` bear (the tui_v3 default kaomoji; now an opt-in `/emoji` style).
+    /// `ʕ•ᴥ•ʔ` bear (the tui_v3 kaomoji). DEFAULT (Slice 6): the pet is ON + bear
+    /// out of the box, so the tab title carries the bear identity; Cat/Dot/Unicode/
+    /// Fox/Off are selectable via `/pets`.
+    #[default]
     Bear,
     /// `=^•.•^=` cat.
     Cat,
@@ -298,11 +302,8 @@ pub enum PetStyle {
     Unicode,
     /// `•ᴗ•ฅ` fox (the 5th style — paw + ears).
     Fox,
-    /// Hide the pet entirely. DEFAULT (redesign_cc.md §2.6: "NOT emoji pet by
-    /// default — kaomoji pet OK as an opt-in /emoji style"). So the out-of-the-box
-    /// spinner is the clean `<arc> <gerund>… <elapsed>` with NO pet; Bear/Cat/Dot/
-    /// Unicode/Fox are still selectable via `/emoji`.
-    #[default]
+    /// Hide the pet entirely (an opt-in via `/pets`). The spinner status line is
+    /// braille-only regardless (Slice 5); the pet only drives the tab-title face.
     Off,
 }
 
@@ -410,10 +411,16 @@ pub fn pet_face(style: PetStyle, elapsed_ms: u64, frame: u64) -> &'static str {
 }
 
 /// Number of 0.1s ticks per pet-frame step (~0.5s cadence; tui_v3 `_spin//5`).
+/// Reserved for the heat-aware tab-title face (Slice 6): the spinner status line no
+/// longer carries a pet (braille-only), so the blinking-face helper has no live
+/// caller until the tab title adopts it.
+#[allow(dead_code)]
 pub const PET_TICKS_PER_FRAME: u64 = 5;
 
 /// The pet face for the 0.1s tick clock — convenience over [`pet_face`] that
-/// applies the `/5` cadence (a ~0.5s blink).
+/// applies the `/5` cadence (a ~0.5s blink). Reserved for the Slice-6 tab-title
+/// face (the spinner is braille-only now); kept + unit-tested for that consumer.
+#[allow(dead_code)]
 pub fn pet(style: PetStyle, elapsed_ms: u64, tick: u64) -> &'static str {
     pet_face(style, elapsed_ms, tick / PET_TICKS_PER_FRAME)
 }
@@ -436,13 +443,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arc_is_the_default_and_not_the_cc_asterisk() {
-        assert_eq!(SpinnerStyle::default(), SpinnerStyle::Arc);
-        // The CC marks must NOT appear in our default spinner.
-        let frames = SpinnerStyle::Arc.frames();
+    fn braille_is_the_default_and_not_the_cc_asterisk() {
+        // Slice 4: the default busy spinner is the braille soul (rhymes with the
+        // `⠿` all-dots glyph the done-line settles on), never the CC asterisk.
+        assert_eq!(SpinnerStyle::default(), SpinnerStyle::Braille);
+        let frames = SpinnerStyle::default().frames();
         assert!(!frames.contains(&'✻'));
         assert!(!frames.contains(&'✷'));
-        assert_eq!(frames, ARC_FRAMES.to_vec());
+        assert_eq!(frames, BRAILLE_FRAMES.to_vec());
     }
 
     #[test]
@@ -523,6 +531,8 @@ mod tests {
 
     #[test]
     fn pet_faces_are_five_styles_four_tiers_four_frames() {
+        // Slice 6: the pet defaults ON + bear (the tab-title identity out of the box).
+        assert_eq!(PetStyle::default(), PetStyle::Bear);
         // Five real styles (plus Off).
         assert_eq!(PetStyle::all().len(), 5);
         for style in PetStyle::all() {

@@ -36,6 +36,13 @@ pub enum CoreToUi {
         version: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Active config name (e.g. `codex-pro`) — additive (serde-default None so
+        /// an older bridge that omits it still parses).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        llm: Option<String>,
+        /// Real underlying model (e.g. `gpt-5.5`), `[...]` tag stripped — additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_real: Option<String>,
     },
     /// A new assistant/tool/system message has started streaming.
     MessageBegin {
@@ -69,6 +76,13 @@ pub enum CoreToUi {
     Status {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Active config name (additive; mirrors `Ready.llm`). A mid-turn failover
+        /// re-emits Status, so this live-updates the header.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        llm: Option<String>,
+        /// Real underlying model (additive; mirrors `Ready.model_real`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_real: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_percent: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,7 +290,24 @@ mod tests {
             ready,
             CoreToUi::Ready {
                 version: Some("1".into()),
-                model: Some("glm".into())
+                model: Some("glm".into()),
+                llm: None,
+                model_real: None
+            }
+        );
+
+        // New bridge: Ready carries the additive llm + model_real fields.
+        let ready_id = CoreToUi::parse_line(
+            r#"{"type":"Ready","version":"1","model":"MixinSession/codex-pro|getoken_20x","llm":"codex-pro","model_real":"gpt-5.5"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ready_id,
+            CoreToUi::Ready {
+                version: Some("1".into()),
+                model: Some("MixinSession/codex-pro|getoken_20x".into()),
+                llm: Some("codex-pro".into()),
+                model_real: Some("gpt-5.5".into())
             }
         );
 
@@ -286,7 +317,9 @@ mod tests {
             bare,
             CoreToUi::Ready {
                 version: Some("1".into()),
-                model: None
+                model: None,
+                llm: None,
+                model_real: None
             }
         );
 
@@ -351,6 +384,8 @@ mod tests {
             status,
             CoreToUi::Status {
                 model: Some("glm".into()),
+                llm: None,
+                model_real: None,
                 context_percent: None,
                 tokens: None,
                 input_tokens: None,
@@ -365,13 +400,15 @@ mod tests {
         // The full token snapshot the bridge emits mid-turn + before MessageEnd
         // (the /cost-wiring payload). Confirms the additive fields round-trip.
         let status_full = CoreToUi::parse_line(
-            r#"{"type":"Status","model":"glm","context_percent":42.5,"tokens":1550,"input_tokens":1200,"output_tokens":350,"cache_tokens":90,"last_input":800,"last_output":120}"#,
+            r#"{"type":"Status","model":"glm","llm":"codex-pro","model_real":"gpt-5.5","context_percent":42.5,"tokens":1550,"input_tokens":1200,"output_tokens":350,"cache_tokens":90,"last_input":800,"last_output":120}"#,
         )
         .unwrap();
         assert_eq!(
             status_full,
             CoreToUi::Status {
                 model: Some("glm".into()),
+                llm: Some("codex-pro".into()),
+                model_real: Some("gpt-5.5".into()),
                 context_percent: Some(42.5),
                 tokens: Some(1550),
                 input_tokens: Some(1200),

@@ -144,6 +144,23 @@ pub fn tf(lang: Lang, key: &str) -> String {
     t(lang, key).to_string()
 }
 
+/// The spinner status line's thinking/effort phrase (CC's `thinking{effortSuffix}`).
+/// With an effort level set it reads "thinking with max effort" (en) / "思考 max"
+/// (zh); with no effort it returns the non-thinking label (`effort.none`). The
+/// `thinking` word is dictionary-driven; the surrounding effort GRAMMAR ("with …
+/// effort" vs none) is language-local and composed here so no i18n key has to be an
+/// empty string (the i18n contract forbids empty values). PURE.
+pub fn thinking_phrase(lang: Lang, effort: Option<&str>) -> String {
+    let Some(level) = effort else {
+        return tf(lang, "effort.none");
+    };
+    let thinking = t(lang, "spinner.thinking");
+    match lang {
+        Lang::En => format!("{thinking} with {level} effort"),
+        Lang::Zh => format!("{thinking} {level}"),
+    }
+}
+
 /// Intern a missing key as a `'static` str (the fallback-of-last-resort). Bounded:
 /// only ever called for keys absent from BOTH dictionaries (a programming error we
 /// want visible), so the set stays tiny. Uses a leak — acceptable for the finite,
@@ -213,10 +230,10 @@ pub const TIPS_EN: &[&str] = &[
     "Tip: prefix `!` runs the rest as a host shell command — output is folded into LLM history.",
     "Tip: Ctrl+S opens the session dashboard; describe a task to start a new session.",
     "Tip: @path inlines a project file into your message (gitignore-aware path completion).",
-    "Tip: /scheduler picks reflect tasks to run on a cron; /emoji changes the spinner + pet.",
+    "Tip: /scheduler picks reflect tasks to run on a cron; /pets changes the tab-title pet.",
     // -- C5-appendix additions (scheduler / mouse / continue) -----------------
     "Tip: /scheduler lists every reflect mode (reflect/*.py) and cron task (sche_tasks/*.json) — tick to start, untick to stop.",
-    "Tip: mouse capture is off by default — drag to select & copy natively; Ctrl+Shift+M toggles wheel scroll.",
+    "Tip: the mouse wheel scrolls the transcript; Shift+drag to select & copy text, or Ctrl+Shift+M for full native drag-select.",
     "Tip: after /continue the full prior conversation replays into the transcript, not just a one-line summary.",
 ];
 
@@ -236,10 +253,10 @@ pub const TIPS_ZH: &[&str] = &[
     "Tip: 以 `!` 开头直接跑 shell —— 命令与输出都会进入 LLM 历史，agent 可以引用。",
     "Tip: Ctrl+S 打开会话面板；描述一个任务即可开启新会话。",
     "Tip: @path 把项目文件内联进消息（路径补全会跳过 .gitignore）。",
-    "Tip: /scheduler 勾选要定时运行的 reflect 任务；/emoji 切换 spinner 与桌宠。",
+    "Tip: /scheduler 勾选要定时运行的 reflect 任务；/pets 切换标签页桌宠。",
     // -- C5-appendix additions (scheduler / mouse / continue) -----------------
     "Tip: /scheduler 列出所有反射模式（reflect/*.py）与定时任务（sche_tasks/*.json）—— 勾选启动，取消勾选停止。",
-    "Tip: 默认关闭鼠标捕获 —— 拖动即可原生选中复制；Ctrl+Shift+M 切换滚轮滚动。",
+    "Tip: 滚轮可滚动对话记录；按住 Shift 拖动即可选中复制文本，或 Ctrl+Shift+M 切到完全原生拖选。",
     "Tip: /continue 之后会把完整的历史对话重放进窗口，而不只是一行摘要。",
 ];
 
@@ -282,6 +299,12 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     // -- app identity / header ------------------------------------------------
     ("app.name", "GenericAgent · tui_v4"),
     ("header.sessions_hint", "⌃S sessions"),
+    // -- header banner box (Slice 2, tui_v3 parity) ---------------------------
+    ("banner.model", "model:"),
+    ("banner.directory", "directory:"),
+    ("banner.session", "session:"),
+    ("banner.llm_hint", "/llm switch"),
+    ("banner.scrollback", "scrollback"),
     // -- connection / footer --------------------------------------------------
     ("conn.connecting", "connecting…"),
     ("conn.connected", "connected"),
@@ -303,6 +326,7 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     // -- dropdown hints -------------------------------------------------------
     ("palette.hint", "  ↑/↓ move · Tab/Enter complete"),
     ("filepicker.hint", "  ↑/↓ move · Tab/Enter complete @path"),
+    ("filepicker.more", "more (keep typing to narrow)"),
     // -- generic picker hints -------------------------------------------------
     ("picker.hint.single", "↑↓ move · enter select · esc cancel"),
     ("picker.hint.preview", "↑↓ preview · enter apply · esc revert"),
@@ -311,7 +335,7 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     // -- picker titles --------------------------------------------------------
     ("picker.title.llm", "Switch model"),
     ("picker.title.theme", "Theme (live preview)"),
-    ("picker.title.emoji", "Pet / spinner style"),
+    ("picker.title.emoji", "Pet style"),
     ("picker.title.language", "Interface language"),
     ("picker.title.export", "Export last reply"),
     ("picker.title.rewind", "Rewind to a turn"),
@@ -428,6 +452,7 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("continue.hint", "type to search · ↑↓ move · enter restore · esc cancel"),
     ("continue.empty", "no past sessions found"),
     ("continue.no_match", "no sessions match your search"),
+    ("continue.searching", " · searching…"),
     ("continue.restoring", "restoring session…"),
     ("continue.rounds", "rounds"),
     // The icon-free restore banner copy (Q10: no ✅). The bridge strips the glyph
@@ -460,8 +485,12 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("theme.unknown", "unknown theme (try /theme)"),
     ("emoji.updated", "style updated"),
     ("emoji.pet", "pet"),
-    ("emoji.spinner", "spinner"),
     ("emoji.off", "off"),
+    ("effort.none", "non-thinking"),
+    // The spinner status line's "thinking" word (CC's `thinking{effortSuffix}`);
+    // the per-language effort grammar ("with <level> effort" in en, "<level>" in zh)
+    // is composed in `thinking_phrase` so no key has to be an empty string.
+    ("spinner.thinking", "thinking"),
     ("lang.set.en", "language → English"),
     ("lang.set.zh", "界面语言 → 简体中文"),
     // -- dashboard ------------------------------------------------------------
@@ -489,8 +518,6 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("cmd.renamed", "renamed session →"),
     ("cmd.restoring", "restoring prior transcript into history…"),
     ("cmd.reloading_keys", "reloading mykey.py…"),
-    ("cmd.effects", "effects"),
-    ("cmd.effects.off_default", "(off by default; demo lands in the effects phase)"),
     // -- bridge / connection notices ------------------------------------------
     ("notice.bridge.not_connected", "cannot send: bridge is not connected (see status line)"),
     ("notice.bridge.spawn_failed", "bridge spawn failed"),
@@ -558,6 +585,7 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     // -- units / misc ---------------------------------------------------------
     ("unit.bytes", "bytes"),
     ("unit.tokens", "tok"),
+    ("tokens.unit", "tokens"),
     ("unit.seconds", "s"),
     // -- copy / clipboard feedback + mouse toggle -----------------------------
     ("copy.ok", "Copied"),
@@ -569,7 +597,7 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("copy.label.cut", "cut"),
     ("copy.label.reply", "last reply"),
     ("copy.label.transcript", "transcript"),
-    ("mouse.on", "mouse capture on (wheel scroll · click dashboard)"),
+    ("mouse.on", "mouse capture on (wheel scroll · click dashboard · Shift+drag to select)"),
     ("mouse.off", "mouse capture off — drag to select, then copy in your terminal"),
     ("mouse.hint.native", "drag to select & copy natively; Ctrl+Shift+M re-enables wheel scroll"),
     ("misc.none", "—"),
@@ -584,6 +612,12 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     // -- app identity / header ------------------------------------------------
     ("app.name", "GenericAgent · tui_v4"),
     ("header.sessions_hint", "⌃S 会话"),
+    // -- header banner box (Slice 2, tui_v3 parity) ---------------------------
+    ("banner.model", "model:"),
+    ("banner.directory", "directory:"),
+    ("banner.session", "session:"),
+    ("banner.llm_hint", "/llm 切换"),
+    ("banner.scrollback", "scrollback"),
     // -- connection / footer --------------------------------------------------
     ("conn.connecting", "连接中…"),
     ("conn.connected", "已连接"),
@@ -605,6 +639,7 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     // -- dropdown hints -------------------------------------------------------
     ("palette.hint", "  ↑/↓ 移动 · Tab/Enter 补全"),
     ("filepicker.hint", "  ↑/↓ 移动 · Tab/Enter 补全 @path"),
+    ("filepicker.more", "项更多（继续输入以缩小范围）"),
     // -- generic picker hints -------------------------------------------------
     ("picker.hint.single", "↑↓ 移动 · enter 选择 · esc 取消"),
     ("picker.hint.preview", "↑↓ 预览 · enter 应用 · esc 还原"),
@@ -613,7 +648,7 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     // -- picker titles --------------------------------------------------------
     ("picker.title.llm", "切换模型"),
     ("picker.title.theme", "主题（实时预览）"),
-    ("picker.title.emoji", "桌宠 / spinner 样式"),
+    ("picker.title.emoji", "桌宠样式"),
     ("picker.title.language", "界面语言"),
     ("picker.title.export", "导出最后回复"),
     ("picker.title.rewind", "回退到某轮"),
@@ -727,6 +762,7 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("continue.hint", "输入搜索 · ↑↓ 移动 · enter 恢复 · esc 取消"),
     ("continue.empty", "未找到历史会话"),
     ("continue.no_match", "没有匹配搜索的会话"),
+    ("continue.searching", " · 搜索中…"),
     ("continue.restoring", "正在恢复会话…"),
     ("continue.rounds", "轮"),
     ("continue.restored", "已恢复 {n} 轮对话"),
@@ -757,8 +793,9 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("theme.unknown", "未知主题（试试 /theme）"),
     ("emoji.updated", "样式已更新"),
     ("emoji.pet", "桌宠"),
-    ("emoji.spinner", "spinner"),
     ("emoji.off", "关闭"),
+    ("effort.none", "非思考模式"),
+    ("spinner.thinking", "思考"),
     ("lang.set.en", "language → English"),
     ("lang.set.zh", "界面语言 → 简体中文"),
     // -- dashboard ------------------------------------------------------------
@@ -786,8 +823,6 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("cmd.renamed", "已重命名会话 →"),
     ("cmd.restoring", "正在把历史对话恢复到上下文…"),
     ("cmd.reloading_keys", "正在重载 mykey.py…"),
-    ("cmd.effects", "特效"),
-    ("cmd.effects.off_default", "（默认关闭；演示将在特效阶段加入）"),
     // -- bridge / connection notices ------------------------------------------
     ("notice.bridge.not_connected", "无法发送：bridge 未连接（见状态栏）"),
     ("notice.bridge.spawn_failed", "bridge 启动失败"),
@@ -855,6 +890,7 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     // -- units / misc ---------------------------------------------------------
     ("unit.bytes", "字节"),
     ("unit.tokens", "tok"),
+    ("tokens.unit", "tokens"),
     ("unit.seconds", "秒"),
     // -- copy / clipboard feedback + mouse toggle -----------------------------
     ("copy.ok", "已复制"),
@@ -866,7 +902,7 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("copy.label.cut", "剪切内容"),
     ("copy.label.reply", "最后回复"),
     ("copy.label.transcript", "对话记录"),
-    ("mouse.on", "鼠标捕获已开启（滚轮滚动 · 点击进面板）"),
+    ("mouse.on", "鼠标捕获已开启（滚轮滚动 · 点击进面板 · Shift+拖动选中）"),
     ("mouse.off", "鼠标捕获已关闭——拖动选中后用终端自带复制"),
     ("mouse.hint.native", "拖动即可原生选中复制；Ctrl+Shift+M 重新开启滚轮滚动"),
     ("misc.none", "—"),
