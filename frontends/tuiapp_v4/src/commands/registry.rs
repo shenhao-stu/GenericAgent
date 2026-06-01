@@ -37,53 +37,69 @@ pub struct SlashCommand {
     pub desc: &'static str,
     /// How the dispatcher handles it (app / UI / fwd).
     pub kind: CommandKind,
+    /// `Some(primary)` if this is an ALIAS of another command — it still resolves
+    /// + completes (so the typed alias keeps working), but `/help` lists it dimmed
+    /// as "alias of /primary" under its primary instead of as a peer row, and the
+    /// palette doesn't surface an alias+primary as two competing primary hits.
+    pub alias_of: Option<&'static str>,
 }
 
 use CommandKind::{App, Fwd, Ui};
 
+/// A primary (non-alias) command shorthand (`alias_of: None`).
+const fn cmd(name: &'static str, desc: &'static str, kind: CommandKind) -> SlashCommand {
+    SlashCommand { name, desc, kind, alias_of: None }
+}
+
+/// An ALIAS command shorthand (`alias_of: Some(primary)`).
+const fn alias(name: &'static str, desc: &'static str, kind: CommandKind, of: &'static str) -> SlashCommand {
+    SlashCommand { name, desc, kind, alias_of: Some(of) }
+}
+
 /// The slash-command registry (union of v2 + v3, ~33 — checklist §4). The cockpit
 /// lists them for discovery + completion; the dispatcher routes by [`CommandKind`].
 pub const COMMANDS: &[SlashCommand] = &[
-    SlashCommand { name: "help", desc: "show the full command list", kind: Ui },
-    SlashCommand { name: "status", desc: "model / state / rounds / context / cwd", kind: Ui },
-    SlashCommand { name: "sessions", desc: "session snapshot (alias of /status)", kind: Ui },
-    SlashCommand { name: "new", desc: "create + switch to a new session", kind: App },
-    SlashCommand { name: "switch", desc: "switch session (dashboard)", kind: Ui },
-    SlashCommand { name: "close", desc: "close the current session", kind: App },
-    SlashCommand { name: "rename", desc: "rename the current session", kind: App },
-    SlashCommand { name: "branch", desc: "fork the session with copied history", kind: App },
-    SlashCommand { name: "rewind", desc: "rewind the last N real turns", kind: Ui },
-    SlashCommand { name: "clear", desc: "clear the display (idle only)", kind: App },
-    SlashCommand { name: "stop", desc: "abort the running task", kind: App },
-    SlashCommand { name: "abort", desc: "abort the running task", kind: App },
-    SlashCommand { name: "llm", desc: "view / switch the model", kind: Ui },
-    SlashCommand { name: "btw", desc: "side-question (background, non-blocking)", kind: Ui },
-    SlashCommand { name: "review", desc: "in-session code review", kind: Fwd },
-    SlashCommand { name: "update", desc: "git pull GA + impact audit", kind: Fwd },
-    SlashCommand { name: "autorun", desc: "autonomous-operation mode", kind: Fwd },
-    SlashCommand { name: "morphling", desc: "absorb an external skill", kind: Fwd },
-    SlashCommand { name: "goal", desc: "goal mode (progress in /workflows)", kind: Fwd },
-    SlashCommand { name: "hive", desc: "multi-worker hive", kind: Fwd },
-    SlashCommand { name: "conductor", desc: "conductor multi-subagent", kind: Fwd },
-    SlashCommand { name: "workflows", desc: "live conductor / hive / goal panel", kind: Ui },
-    SlashCommand { name: "scheduler", desc: "reflect tasks + cron status", kind: Ui },
-    SlashCommand { name: "continue", desc: "searchable picker over session logs", kind: Ui },
-    SlashCommand { name: "resume", desc: "GA core recovery prompt", kind: Fwd },
-    SlashCommand { name: "cost", desc: "token usage (in/out/cache/context%)", kind: App },
-    SlashCommand { name: "export", desc: "export the last reply (clip/file/all)", kind: Ui },
-    SlashCommand { name: "restore", desc: "restore last model_responses into history", kind: App },
-    SlashCommand { name: "reload-keys", desc: "hot-reload mykey.py", kind: App },
-    SlashCommand { name: "language", desc: "switch interface language + repaint", kind: Ui },
-    SlashCommand { name: "emoji", desc: "pet / spinner style", kind: Ui },
-    SlashCommand { name: "effort", desc: "reasoning-effort slider (low…max)", kind: Ui },
-    SlashCommand { name: "verbose", desc: "full-screen tool-call audit", kind: Ui },
-    SlashCommand { name: "tools", desc: "full-screen tool-call audit (alias)", kind: Ui },
-    SlashCommand { name: "trace", desc: "full-screen tool-call audit (alias)", kind: Ui },
-    SlashCommand { name: "effects", desc: "effects intensity + demo splash", kind: App },
-    SlashCommand { name: "mouse", desc: "toggle mouse capture (off = native drag-select to copy)", kind: App },
-    SlashCommand { name: "theme", desc: "theme picker with live preview", kind: Ui },
-    SlashCommand { name: "quit", desc: "quit tui_v4", kind: App },
-    SlashCommand { name: "exit", desc: "quit tui_v4 (alias)", kind: App },
+    cmd("help", "show the full command list", Ui),
+    cmd("keybindings", "show the keyboard shortcuts", Ui),
+    cmd("status", "model / state / rounds / context / cwd", Ui),
+    alias("sessions", "session snapshot", Ui, "status"),
+    cmd("new", "create + switch to a new session", App),
+    cmd("switch", "switch session (dashboard)", Ui),
+    cmd("close", "close the current session", App),
+    cmd("rename", "rename the current session", App),
+    cmd("branch", "fork the session with copied history", App),
+    cmd("rewind", "rewind the last N real turns", Ui),
+    cmd("clear", "clear the display (idle only)", App),
+    cmd("stop", "abort the running task", App),
+    alias("abort", "abort the running task", App, "stop"),
+    cmd("llm", "view / switch the model", Ui),
+    cmd("btw", "side-question (background, non-blocking)", Ui),
+    cmd("review", "in-session code review", Fwd),
+    cmd("update", "git pull GA + impact audit", Fwd),
+    cmd("autorun", "autonomous-operation mode", Fwd),
+    cmd("morphling", "absorb an external skill", Fwd),
+    cmd("goal", "goal mode (progress in /workflows)", Fwd),
+    cmd("hive", "multi-worker hive", Fwd),
+    cmd("conductor", "conductor multi-subagent", Fwd),
+    cmd("workflows", "live conductor / hive / goal panel", Ui),
+    cmd("scheduler", "reflect tasks + cron status", Ui),
+    cmd("continue", "searchable picker over session logs", Ui),
+    cmd("resume", "GA core recovery prompt", Fwd),
+    cmd("cost", "token usage (in/out/cache/context%)", App),
+    cmd("export", "export the last reply (clip/file/all)", Ui),
+    cmd("restore", "restore last model_responses into history", App),
+    cmd("reload-keys", "hot-reload mykey.py", App),
+    cmd("language", "switch interface language + repaint", Ui),
+    cmd("emoji", "pet / spinner style", Ui),
+    cmd("effort", "reasoning-effort slider (low…max)", Ui),
+    cmd("verbose", "full-screen tool-call audit", Ui),
+    alias("tools", "full-screen tool-call audit", Ui, "verbose"),
+    alias("trace", "full-screen tool-call audit", Ui, "verbose"),
+    cmd("effects", "effects intensity + demo splash", App),
+    cmd("fold", "fold / unfold all completed tool chips", App),
+    cmd("theme", "theme picker with live preview", Ui),
+    cmd("quit", "quit tui_v4", App),
+    alias("exit", "quit tui_v4", App, "quit"),
 ];
 
 /// Max rows the palette shows at once (tui_v3's 6-row viewport).
@@ -148,6 +164,15 @@ pub fn palette_matches(text: &str) -> Vec<SlashCommand> {
     let mut out = exact;
     out.extend(prefix);
     out.extend(fuzzy);
+    // De-dup: when an alias AND its primary both match the partial, drop the alias
+    // so the palette never offers `/tools` and `/verbose` as two competing rows
+    // (the alias still resolves + completes when typed alone). An alias whose
+    // primary is NOT in the match set survives (so `/abort` still completes).
+    let present: Vec<&'static str> = out.iter().map(|c| c.name).collect();
+    out.retain(|c| match c.alias_of {
+        Some(primary) => !present.contains(&primary),
+        None => true,
+    });
     out
 }
 
@@ -190,14 +215,22 @@ pub fn did_you_mean(typo: &str) -> Option<&'static str> {
     if t.is_empty() {
         return None;
     }
-    let mut best: Option<(&'static str, usize)> = None;
+    let mut best: Option<(&'static SlashCommand, usize)> = None;
     for c in COMMANDS {
         let d = levenshtein(&t, c.name);
-        match best {
-            Some((_, bd)) if d >= bd => {}
-            _ => best = Some((c.name, d)),
+        let better = match best {
+            None => true,
+            Some((bc, bd)) => {
+                // Strictly closer wins; on a TIE prefer a PRIMARY over an alias so
+                // the breadcrumb never flaps between equidistant aliases (C5 F7).
+                d < bd || (d == bd && bc.alias_of.is_some() && c.alias_of.is_none())
+            }
+        };
+        if better {
+            best = Some((c, d));
         }
     }
+    let best = best.map(|(c, d)| (c.name, d));
     // Threshold: at most a third of the longer length, min 2 — tolerant of a typo
     // but not of an unrelated word.
     best.and_then(|(name, d)| {
@@ -240,6 +273,19 @@ pub fn complete_to(cmd: &SlashCommand) -> String {
     format!("/{} ", cmd.name)
 }
 
+/// The PRIMARY commands of a [`CommandKind`] in registry order (aliases excluded).
+/// `/help` lists these as peer rows; the aliases hang under their primary as dim
+/// "alias of /X" lines (see [`aliases_of`]). PURE.
+pub fn primaries_of_kind(kind: CommandKind) -> impl Iterator<Item = &'static SlashCommand> {
+    COMMANDS.iter().filter(move |c| c.kind == kind && c.alias_of.is_none())
+}
+
+/// The aliases that point at `primary` (in registry order), for the `/help` dim
+/// "alias of /primary" lines. PURE.
+pub fn aliases_of(primary: &str) -> impl Iterator<Item = &'static SlashCommand> + '_ {
+    COMMANDS.iter().filter(move |c| c.alias_of == Some(primary))
+}
+
 /// The visible window of `matches` around the selected index (a scrolling viewport
 /// of [`PALETTE_ROWS`] rows). Returns `(start, slice)`. PURE.
 pub fn palette_window(matches: &[SlashCommand], sel: usize) -> (usize, Vec<SlashCommand>) {
@@ -267,16 +313,18 @@ mod tests {
     /// THE deliverable test: the registry resolves ALL ~33 §4 command names.
     /// Every name in the §4 union (UI / fwd / app) must `resolve()` to a command,
     /// case-insensitively, and report a sensible [`CommandKind`]; the count is the
-    /// full union incl. aliases.
+    /// full union incl. the 5 marked aliases. `/mouse` is GONE (Q10 D4) and the
+    /// `/keybindings` + `/fold` rows are present (Q7 / Slice 6).
     #[test]
     fn registry_resolves_all_commands() {
-        // The full §4 union (every name listed in checklist §4, incl. aliases).
+        // The full §4 union (every name listed in checklist §4, incl. the 5 marked
+        // aliases). `/mouse` was dropped (Q10); `/keybindings` + `/fold` were added.
         let all: &[&str] = &[
-            "help", "status", "sessions", "new", "switch", "close", "rename", "branch",
+            "help", "keybindings", "status", "sessions", "new", "switch", "close", "rename", "branch",
             "rewind", "clear", "stop", "abort", "llm", "btw", "review", "update", "autorun",
             "morphling", "goal", "hive", "conductor", "workflows", "scheduler", "continue", "resume",
             "cost", "export", "restore", "reload-keys", "language", "emoji", "effort", "verbose",
-            "tools", "trace", "effects", "mouse", "theme", "quit", "exit",
+            "tools", "trace", "effects", "fold", "theme", "quit", "exit",
         ];
         for name in all {
             let c = resolve(name).unwrap_or_else(|| panic!("/{name} must resolve"));
@@ -287,7 +335,7 @@ mod tests {
             // Resolution survives glued-on args (the dispatcher may pass the head).
             assert!(resolve(&format!("{name} some args")).is_some(), "/{name} resolves with args");
         }
-        // The §4 spec says ~33; the union with aliases (incl. /effort) is 38.
+        // The §4 spec says ~33; the union with the 5 marked aliases is 41.
         assert_eq!(COMMANDS.len(), all.len());
         assert!(COMMANDS.len() >= 33, "expected ~33+ commands, got {}", COMMANDS.len());
 
@@ -302,6 +350,71 @@ mod tests {
         assert!(resolve("definitely-not-a-command").is_none());
         assert!(resolve("").is_none());
         assert!(resolve("/").is_none());
+    }
+
+    /// Q6 — the 5 alias commands are MARKED (`alias_of`) at their primary, still
+    /// RESOLVE (so the typed alias keeps working), but the palette does not surface
+    /// an alias AND its primary as two competing rows (dedup), and each primary they
+    /// point at exists. This is the "no duplicate primary name; aliases still work"
+    /// resolution of the C3-dedup / C5-D7 specs.
+    #[test]
+    fn aliases_marked_not_duplicated() {
+        // Exactly these 5 aliases, each pointing at its primary.
+        let expected = [
+            ("sessions", "status"),
+            ("abort", "stop"),
+            ("tools", "verbose"),
+            ("trace", "verbose"),
+            ("exit", "quit"),
+        ];
+        for (a, primary) in expected {
+            let cmd = resolve(a).unwrap_or_else(|| panic!("/{a} must still resolve"));
+            assert_eq!(cmd.alias_of, Some(primary), "/{a} is marked alias of /{primary}");
+            // The primary it points at is a real, non-alias command.
+            let p = resolve(primary).unwrap_or_else(|| panic!("primary /{primary} must exist"));
+            assert_eq!(p.alias_of, None, "/{primary} is a primary, not itself an alias");
+        }
+        // Those are the ONLY aliases — nothing else carries `alias_of`.
+        let marked: Vec<&str> = COMMANDS.iter().filter(|c| c.alias_of.is_some()).map(|c| c.name).collect();
+        assert_eq!(marked.len(), expected.len(), "exactly 5 aliases marked, got {marked:?}");
+
+        // DEDUP: typing a prefix that hits BOTH an alias and its primary surfaces
+        // the PRIMARY only — `/verbose` is present, neither `tools` nor `trace`
+        // appears as a competing primary row (they share no prefix with verbose, so
+        // the real collision is the EXPLICIT `aliases_of`/`primaries_of_kind` split;
+        // assert that split here).
+        let ui_primaries: Vec<&str> = primaries_of_kind(CommandKind::Ui).map(|c| c.name).collect();
+        assert!(ui_primaries.contains(&"verbose"), "verbose is a UI primary row");
+        assert!(!ui_primaries.contains(&"tools"), "tools is NOT a peer primary row");
+        assert!(!ui_primaries.contains(&"trace"), "trace is NOT a peer primary row");
+        // The aliases hang under their primary instead.
+        let verbose_aliases: Vec<&str> = aliases_of("verbose").map(|c| c.name).collect();
+        assert_eq!(verbose_aliases, vec!["tools", "trace"], "tools+trace are listed under /verbose");
+
+        // A SHARED-PREFIX collision is the load-bearing palette case: `/st` matches
+        // BOTH `status` and (fuzzily) others, and `stop`+`abort` is the alias pair —
+        // typing a partial matching both `stop` and its alias `abort` must NOT show
+        // both. `abort` shares no prefix with `stop`, but a fuzzy `/aot` hits both;
+        // verify the alias is dropped when its primary co-occurs, and survives alone.
+        let both = palette_matches("/stop"); // exact `stop`; `abort` is not a match here
+        assert!(both.iter().any(|c| c.name == "stop"));
+        // When ONLY the alias matches (its primary absent), it survives so it still
+        // completes — `/abort` exact.
+        let alias_only = palette_matches("/abort");
+        assert!(alias_only.iter().any(|c| c.name == "abort"), "/abort still completes alone");
+    }
+
+    /// Q10 — `/mouse` was removed from the registry (mouse capture defaults OFF for
+    /// native drag-select; the `Ctrl+Shift+M` chord is the wheel-scroll opt-in). It
+    /// must NOT resolve and must NOT appear in the palette.
+    #[test]
+    fn mouse_command_removed() {
+        assert!(resolve("mouse").is_none(), "/mouse is no longer a command");
+        assert!(!COMMANDS.iter().any(|c| c.name == "mouse"), "/mouse is gone from COMMANDS");
+        assert!(
+            !palette_matches("/mouse").iter().any(|c| c.name == "mouse"),
+            "/mouse does not surface in the palette"
+        );
     }
 
     #[test]

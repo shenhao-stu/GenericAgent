@@ -202,6 +202,29 @@ impl Viewport {
         true
     }
 
+    /// Re-anchor so the row `(block_id, intra)` sits `screen_offset` rows below the
+    /// viewport top, then re-derive the logical anchor from that top (Fix E / Q8). A
+    /// fold toggle changes a block's row count; calling this with the CLICKED node's
+    /// `(block_id, intra)` and the screen offset the user clicked at keeps that node
+    /// visually fixed — so expanding a node above the viewport does NOT jump the view
+    /// (the failure the spec calls out), and the anchor lands on the clicked node, not
+    /// `Bottom`. Clamped at both ends; if the node is gone the anchor is left as-is.
+    /// Resolve against the cache the toggle was applied to (the next frame re-syncs).
+    pub fn anchor_node_at_offset(
+        &mut self,
+        block_id: BlockId,
+        intra: usize,
+        screen_offset: usize,
+        cache: &WrapCache,
+    ) {
+        let Some(node_row) = cache.locate(block_id, intra) else {
+            return;
+        };
+        let top = node_row.saturating_sub(screen_offset);
+        let top = self.clamp_top(top, cache);
+        self.anchor_from_top(top, cache);
+    }
+
     /// The visible window: exactly the `[top, top + height)` slice of visual
     /// lines at the current width. Virtualized — cost is O(height), not
     /// O(transcript). The caller pads any short tail with blank rows so the grid

@@ -28,6 +28,8 @@ pub mod viewport;
 #[allow(unused_imports)]
 pub use block::{Block, BlockId, BlockRole};
 #[allow(unused_imports)]
+pub use fold::{BlockFolds, NodeId};
+#[allow(unused_imports)]
 pub use copy::{CopyCaps, CopyMethod, CopyResult, Selection};
 #[allow(unused_imports)]
 pub use measure::{VisualLine, WrapCache};

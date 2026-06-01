@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn fire_color_uses_theme_tokens() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let pal = EffectPalette::from_theme(&theme);
         // Hottest maps to fire_hot, coldest to smoke.
         assert_eq!(heat_to_color(MAX_HEAT, &pal), pal.fire_hot);

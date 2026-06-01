@@ -564,7 +564,7 @@ mod tests {
     fn continue_renders_search_and_rows() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let p = ContinuePicker::new(vec![
             sess("model_responses_111.txt", 300, "refactor the parser", 4),
         ]);

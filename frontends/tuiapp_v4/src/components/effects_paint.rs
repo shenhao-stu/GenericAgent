@@ -10,14 +10,16 @@
 //! layer, so the look is identical in both.
 
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::AppState;
 use crate::effects::fire::Fire;
+use crate::effects::shimmer::{blend, intensity_at};
 use crate::effects::EffectPalette;
+use crate::theme::{lighten, FxBorder, FxCommand};
 
 /// The blank braille cell (`U+2800`), rendered as a space so snow doesn't fill the field.
 const BRAILLE_BLANK: char = '\u{2800}';
@@ -179,31 +181,73 @@ fn draw_fire(frame: &mut Frame, app: &AppState, area: Rect) {
     }
 }
 
-/// Paint a FLOWING rainbow over the composer's BORDER, plus a few drifting
-/// monochrome particle/snow symbols along the top edge. Bounded to the 1-cell
-/// border outline, so the terminal BACKGROUND stays clean (user feedback: bind
-/// effects to the input box, don't repaint the whole screen). Truecolor-gated (a
-/// no-op at mono / NO_COLOR — the Block's plain border shows) and skipped in shell
-/// mode (the hot-pink border is a meaningful indicator we keep). `now_ms` drives
-/// the flow + drift so the rainbow advances around the border with the tick clock.
-pub fn draw_composer_border_fx(frame: &mut Frame, app: &AppState, area: Rect, now_ms: u64) {
+/// The per-command border color at perimeter index `k` (of `perim` cells) at phase
+/// `t`, switched by the command's [`FxBorder`] identity — Pulse breathes the whole
+/// border, Orbit/Sweep run a raised-cosine highlight around/along it, Rainbow flows
+/// the ROYGBIV stops. PURE (no clock, no alloc) so the painter calls it per cell with
+/// zero per-frame `Box<dyn Fn>` and a unit test can assert the four are distinct.
+pub(crate) fn fx_border_color(border: &FxBorder, k: usize, perim: f32, t: f32) -> Color {
+    match *border {
+        FxBorder::Rainbow { stops, .. } => {
+            crate::theme::rainbow::flow_color(&stops, k as f32 / perim + t)
+        }
+        // Breathing: the WHOLE border pulses base→glow together (no travel by `k`).
+        FxBorder::Pulse { color, .. } => {
+            let glow = lighten(color, 0.30);
+            let b = 0.5 * (1.0 + (t * 6.0).cos());
+            blend(color, glow, b)
+        }
+        // Orbit: a soft highlight hump travels the perimeter (busy swarm motes).
+        FxBorder::Orbit { color, .. } => {
+            let glow = lighten(color, 0.30);
+            blend(color, glow, intensity_at(t.rem_euclid(1.0), 0.12, k, perim as usize))
+        }
+        // Sweep: a wider, faster baton highlight (still perimeter-indexed; reads as a
+        // L→R beat on the long top edge where most of the cells live).
+        FxBorder::Sweep { color, .. } => {
+            let glow = lighten(color, 0.35);
+            blend(color, glow, intensity_at(t.rem_euclid(1.0), 0.18, k, perim as usize))
+        }
+    }
+}
+
+/// Paint the composer's BORDER with the typed command's DISTINCT effect (Q11b): each
+/// of `/goal /hive /conductor /morphling` gets its own color source + motion + corner
+/// glyph (via [`FxCommand::border`]), plus a few drifting monochrome particle dingbats
+/// along the top edge in the same color. Bounded to the 1-cell border outline so the
+/// terminal BACKGROUND stays clean. Truecolor-gated (a no-op at mono / NO_COLOR — the
+/// Block's plain border shows) and skipped in shell mode (the hot-pink border is a
+/// meaningful indicator we keep). `now_ms` drives the flow/pulse/sweep via the tick.
+pub fn draw_composer_border_fx(
+    frame: &mut Frame,
+    app: &AppState,
+    area: Rect,
+    now_ms: u64,
+    cmd: FxCommand,
+) {
     if !app.effects.caps.enabled() || area.width < 2 || area.height < 2 {
         return;
     }
     if app.composer.is_shell_mode() {
         return;
     }
-    let stops = app.theme.rainbow();
+    let border = cmd.border(&app.theme);
+    let corner = match border {
+        FxBorder::Pulse { corner, .. }
+        | FxBorder::Orbit { corner, .. }
+        | FxBorder::Sweep { corner, .. }
+        | FxBorder::Rainbow { corner, .. } => corner,
+    };
     let w = area.width as usize;
     let h = area.height as usize;
     let perim = (2 * (w + h)).saturating_sub(4).max(1) as f32;
-    let phase = now_ms as f32 * 0.00007; // gentle flow per millisecond
-    let color_at = |k: usize| crate::theme::rainbow::flow_color(stops, k as f32 / perim + phase);
+    let t = now_ms as f32 * 0.00007; // gentle flow per millisecond
+    let color_at = |k: usize| fx_border_color(&border, k, perim, t);
 
-    // Top edge, left→right (perimeter indices 0..w), with corner glyphs.
+    // Top edge, left→right (perimeter indices 0..w), with the command corner glyph.
     let mut top: Vec<Span> = Vec::with_capacity(w);
     for x in 0..w {
-        let g = if x == 0 { '┌' } else if x == w - 1 { '┐' } else { '─' };
+        let g = if x == 0 || x == w - 1 { corner } else { '─' };
         top.push(Span::styled(g.to_string(), Style::default().fg(color_at(x))));
     }
     frame.render_widget(
@@ -214,7 +258,7 @@ pub fn draw_composer_border_fx(frame: &mut Frame, app: &AppState, area: Rect, no
     let base_bottom = w + h.saturating_sub(2);
     let mut bot: Vec<Span> = Vec::with_capacity(w);
     for x in 0..w {
-        let g = if x == 0 { '└' } else if x == w - 1 { '┘' } else { '─' };
+        let g = if x == 0 || x == w - 1 { corner } else { '─' };
         bot.push(Span::styled(
             g.to_string(),
             Style::default().fg(color_at(base_bottom + (w - 1 - x))),
@@ -244,8 +288,8 @@ pub fn draw_composer_border_fx(frame: &mut Frame, app: &AppState, area: Rect, no
     }
 
     // Border-bound particles along the TOP edge — monochrome SYMBOL dingbats (NO
-    // emoji), colored by the same flow. A couple by default; more in subtle/full.
-    // Still bounded to the top border row → no background change.
+    // emoji), colored by the same per-command flow. Morphling shape-shifts its glyph
+    // set; the others use the calm sparkle set. Bounded to the top row.
     let count = match app.effects.mode {
         crate::effects::EffectMode::Full => 6usize,
         crate::effects::EffectMode::Subtle => 3,
@@ -253,7 +297,11 @@ pub fn draw_composer_border_fx(frame: &mut Frame, app: &AppState, area: Rect, no
     };
     let count = if app.effects.demo_active() { count.max(6) } else { count };
     if w > 6 {
-        let glyphs = ['✦', '✧', '·', '✶', '∗'];
+        let glyphs: &[char] = match cmd {
+            FxCommand::Morphling => &['✦', '✶', '❄', '∗'],
+            FxCommand::Hive => &['·', '∘', '✦', '∗'],
+            _ => &['✦', '✧', '·', '✶', '∗'],
+        };
         let span_w = w - 2; // interior of the top edge, between the corners
         for p in 0..count {
             let stride = (span_w / count.max(1)).max(2);
@@ -268,5 +316,48 @@ pub fn draw_composer_border_fx(frame: &mut Frame, app: &AppState, area: Rect, no
                 Rect { x: area.x + gx as u16, y: area.y, width: 1, height: 1 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+
+    /// The whole point of the per-command identity (Q11b): the four commands paint
+    /// the border in DISTINCT colors. We probe `color_at(0)` at a fixed phase for each
+    /// `FxBorder` variant (the painter calls this exact pure fn per cell) and assert
+    /// all four differ — proving `/goal` ≠ `/hive` ≠ `/conductor` ≠ `/morphling`.
+    #[test]
+    fn each_fxborder_yields_distinct_color_at_0() {
+        let theme = Theme::default_theme();
+        let perim = 40.0_f32;
+        let t = 0.0_f32;
+        let colors: Vec<Color> =
+            [FxCommand::Goal, FxCommand::Hive, FxCommand::Conductor, FxCommand::Morphling]
+                .iter()
+                .map(|c| fx_border_color(&c.border(&theme), 0, perim, t))
+                .collect();
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(
+                    colors[i], colors[j],
+                    "FxBorder colors must be distinct ({i} vs {j}): {:?} == {:?}",
+                    colors[i], colors[j]
+                );
+            }
+        }
+        // And each corner glyph is the command's own (◆/⬡/▸/◆) — Goal vs Hive differ.
+        let corner = |c: FxCommand| match c.border(&theme) {
+            FxBorder::Pulse { corner, .. }
+            | FxBorder::Orbit { corner, .. }
+            | FxBorder::Sweep { corner, .. }
+            | FxBorder::Rainbow { corner, .. } => corner,
+        };
+        assert_eq!(corner(FxCommand::Goal), '◆');
+        assert_eq!(corner(FxCommand::Hive), '⬡');
+        assert_eq!(corner(FxCommand::Conductor), '▸');
+        assert_eq!(corner(FxCommand::Morphling), '◆');
+        assert_ne!(corner(FxCommand::Goal), corner(FxCommand::Hive), "◆ vs ⬡");
     }
 }

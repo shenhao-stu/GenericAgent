@@ -182,8 +182,9 @@ impl Session {
         preview_line(&self.transcript, self.status())
     }
 
-    /// Allocate the next stable block id for this session.
-    fn alloc_block_id(&mut self) -> u64 {
+    /// Allocate the next stable block id for this session. `pub(in crate::app)`
+    /// so the shared [`reducer`](crate::app::reducer) fold can mint ids.
+    pub(in crate::app) fn alloc_block_id(&mut self) -> u64 {
         let id = self.next_block_id;
         self.next_block_id = self.next_block_id.wrapping_add(1);
         id
@@ -211,77 +212,12 @@ impl Session {
             .push(Block::new_external(id, None, Role::System, text, true));
     }
 
-    /// Fold one bridge frame into THIS session's state (the per-session reducer).
-    /// Mirrors the active-session `AppState::apply_frame` but writes only to this
-    /// session's own fields, so concurrent children never cross. `now_ms` injected.
+    /// Fold one bridge frame into THIS session's state, through the ONE shared
+    /// [`reducer::apply_frame`](crate::app::reducer) fold (the [`FrameSink`]
+    /// hooks for `Session` write only to this session's own fields, so concurrent
+    /// children never cross — the per-arm behavior is in `app::reducer`).
     pub fn apply_frame(&mut self, frame: CoreToUi, now_ms: u64) {
-        match frame {
-            CoreToUi::Ready { model, .. } => {
-                self.model = model.clone();
-                self.conn = ConnStatus::Connected { model };
-            }
-            CoreToUi::MessageBegin { mid, role } => {
-                self.busy = true;
-                self.busy_since_ms = now_ms;
-                self.pending_ask = None;
-                let id = self.alloc_block_id();
-                self.transcript
-                    .push(Block::new_external(id, Some(mid), Role::from_proto(&role), String::new(), false));
-            }
-            CoreToUi::MessageDelta { mid, text } => {
-                if let Some(block) = self.block_for_mid_mut(&mid) {
-                    block.source.push_str(&text);
-                    block.rev = block.rev.wrapping_add(1);
-                } else {
-                    let id = self.alloc_block_id();
-                    self.transcript
-                        .push(Block::new_external(id, Some(mid), Role::Assistant, text, false));
-                    self.busy = true;
-                }
-                self.had_reply = true;
-            }
-            CoreToUi::MessageEnd { mid, .. } => {
-                if let Some(block) = self.block_for_mid_mut(&mid)
-                    && !block.finalized
-                {
-                    block.finalized = true;
-                    block.rev = block.rev.wrapping_add(1);
-                    if block.role == Role::Assistant {
-                        self.had_reply = true;
-                    }
-                }
-                self.busy = false;
-            }
-            CoreToUi::AskUser { ask_id, question, options, free_text } => {
-                self.push_notice(format!("? {question}"));
-                self.pending_ask = Some(PendingAsk { ask_id, question, options, free_text });
-                self.busy = false;
-            }
-            CoreToUi::Status { model, .. } => {
-                if let Some(m) = model {
-                    self.model = Some(m.clone());
-                    if let ConnStatus::Connected { model: cm } = &mut self.conn {
-                        *cm = Some(m);
-                    }
-                }
-            }
-            CoreToUi::Pong { .. } => {}
-            // A background session never opens the `/llm` overlay; the active
-            // session's reducer (AppState) handles LlmList. Ignore here.
-            CoreToUi::LlmList { .. } => {}
-            // `/btw` answers + `/rewind` confirmations are surfaced by the ACTIVE
-            // session's AppState reducer (the card / notice lives there). A
-            // background session has no card to fill, so ignore (never history).
-            CoreToUi::BtwAnswer { .. } => {}
-            CoreToUi::RewindResult { .. } => {}
-            CoreToUi::Error { message, fatal, .. } => {
-                self.push_notice(format!("error: {message}"));
-                if fatal {
-                    self.conn = ConnStatus::Disconnected { reason: message };
-                    self.busy = false;
-                }
-            }
-        }
+        crate::app::reducer::apply_frame(self, frame, now_ms);
     }
 
     /// Fold a non-frame bridge lifecycle event (spawn failure / child exit /
@@ -311,8 +247,9 @@ impl Session {
         }
     }
 
-    /// Find the in-flight block for a mid, newest first.
-    fn block_for_mid_mut(&mut self, mid: &str) -> Option<&mut Block> {
+    /// Find the in-flight block for a mid, newest first. `pub(in crate::app)` so
+    /// the shared [`reducer`](crate::app::reducer) fold can stream into it.
+    pub(in crate::app) fn block_for_mid_mut(&mut self, mid: &str) -> Option<&mut Block> {
         self.transcript
             .iter_mut()
             .rev()
@@ -410,6 +347,12 @@ impl SessionMap {
     /// The active session (always present — the map is never empty while running).
     pub fn active(&self) -> &Session {
         self.session(self.active).expect("active session present")
+    }
+
+    /// The active session's display NAME (the header's `session …` field, Q7).
+    /// Falls back to `"main"` if (impossibly) the active id has no record.
+    pub fn active_name(&self) -> &str {
+        self.session(self.active).map(|s| s.name.as_str()).unwrap_or("main")
     }
 
     /// The active session, mutably. (Used by tests + the branch path.)

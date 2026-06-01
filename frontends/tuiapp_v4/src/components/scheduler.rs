@@ -13,6 +13,8 @@
 //! `scheduler_flow_states` deliverable). The renderer only PAINTS, routing every
 //! user-facing string through `crate::i18n` (no hardcoded colors — theme tokens).
 
+use std::path::Path;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -28,9 +30,10 @@ use crate::theme::{Theme, Token};
 pub struct ReflectTask {
     /// Stable task id (the index the apply step reports to the core).
     pub id: usize,
-    /// Display name (e.g. "daily standup reflect").
+    /// Display name (the reflect-script stem or cron-task stem).
     pub name: String,
-    /// The cron cadence label (e.g. "09:00", "hourly", "Fri 17:00").
+    /// The cadence label: a reflect mode reads `"reflect"`; a cron task reads its
+    /// legal `repeat` grammar (`once/daily/weekday/weekly/monthly/every_*`).
     pub cadence: String,
     /// Whether this task is currently running/scheduled (drives the pre-tick).
     pub running: bool,
@@ -216,10 +219,81 @@ pub fn compute_diff(tasks: &[ReflectTask], checked: &[bool]) -> Vec<DiffEntry> {
     out
 }
 
-/// The default reflect-task set surfaced when no live cron data is available — a
-/// small representative set so the flow is demonstrable and degrades gracefully
-/// (§7 "Degrade gracefully"). A real watcher would replace this. The first task is
-/// shown as already-running so the pre-tick + a stop-diff are both exercisable.
+/// Discover the REAL reflect modes + cron tasks (slash_cmds.py parity, §7 Q10):
+///   `reflect/*.py` (non-`_`, minus `scheduler.py` itself) → reflect-mode rows,
+///       cadence `"reflect"` (the cron ENGINE, not a cron job; running detection is
+///       a future cmdline probe so they start un-ticked here).
+///   `sche_tasks/*.json` → cron rows, cadence = the legal `repeat` label, pre-ticked
+///       iff `enabled` (the cron task's CURRENT scheduled state).
+/// `id` is the row index the apply step reports. Reflect modes sort before cron
+/// tasks; within each group the directory order is sorted for stability.
+pub fn discover_tasks(repo_root: &Path) -> Vec<ReflectTask> {
+    let mut out: Vec<ReflectTask> = Vec::new();
+    let mut id = 0usize;
+
+    let mut reflect: Vec<String> = read_dir_stems(&repo_root.join("reflect"), ".py")
+        .into_iter()
+        .filter(|n| n != "scheduler")
+        .collect();
+    reflect.sort();
+    for name in reflect {
+        out.push(ReflectTask::new(id, name, "reflect", false));
+        id += 1;
+    }
+
+    let mut cron: Vec<String> = read_dir_stems(&repo_root.join("sche_tasks"), ".json");
+    cron.sort();
+    for name in cron {
+        let (cadence, enabled) = read_cron_meta(&repo_root.join("sche_tasks").join(format!("{name}.json")));
+        out.push(ReflectTask::new(id, name, cadence, enabled));
+        id += 1;
+    }
+    out
+}
+
+/// Names (extension-stripped) of every `<root>/*<ext>` entry whose file name does
+/// not start with `_`. Empty (not an error) when the dir is missing — the caller
+/// then falls back to [`default_tasks`].
+fn read_dir_stems(dir: &Path, ext: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(ext) && !name.starts_with('_') {
+            out.push(name[..name.len() - ext.len()].to_string());
+        }
+    }
+    out
+}
+
+/// Read a `sche_tasks/*.json` cron file's `(cadence, enabled)`. The cadence is the
+/// legal `repeat` grammar (`once/daily/weekday/weekly/monthly/every_*`, mirroring
+/// `slash_cmds.list_scheduler_tasks`'s `repeat|cron|every` fallback); `schedule`
+/// (HH:MM) is deliberately NOT the cadence. A missing/unparsable file degrades to
+/// `("reflect", false)` so a malformed task still renders.
+fn read_cron_meta(path: &Path) -> (String, bool) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return ("reflect".into(), false);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ("reflect".into(), false);
+    };
+    let cadence = ["repeat", "cron", "every"]
+        .iter()
+        .find_map(|k| value.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or("reflect")
+        .to_string();
+    let enabled = value.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    (cadence, enabled)
+}
+
+/// The default reflect-task set surfaced ONLY when [`discover_tasks`] finds an
+/// empty tree (no `reflect/` or `sche_tasks/` on disk) — a small representative set
+/// so the flow is demonstrable and degrades gracefully (§7 "Degrade gracefully").
+/// The first task is shown as already-running so the pre-tick + a stop-diff are
+/// both exercisable.
 pub fn default_tasks() -> Vec<ReflectTask> {
     vec![
         ReflectTask::new(0, "daily standup reflect", "09:00", true),
@@ -269,6 +343,30 @@ pub fn render(frame: &mut Frame, area: Rect, sched: &Scheduler, theme: &Theme, l
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The localized row-kind tag: a `"reflect"`-cadence row is a reflect mode, any
+/// other cadence is a cron task. PURE (no `Instant`).
+fn kind_label(lang: Lang, t: &ReflectTask) -> &'static str {
+    if t.cadence == "reflect" {
+        i18n::t(lang, "scheduler.kind.reflect")
+    } else {
+        i18n::t(lang, "scheduler.kind.cron")
+    }
+}
+
+/// The display label for a cadence. A reflect mode shows the localized "watcher"
+/// label; a cron task shows its legal `repeat` grammar — localized for the well-
+/// known repeats (`once/daily/weekday/weekly/monthly`), else the RAW label verbatim
+/// (`every_30m`, …). Never an HH:MM `schedule`. PURE.
+fn cadence_label(lang: Lang, cadence: &str) -> String {
+    match cadence {
+        "reflect" => i18n::t(lang, "scheduler.cadence.reflect").to_string(),
+        "once" | "daily" | "weekday" | "weekly" | "monthly" => {
+            i18n::t(lang, &format!("scheduler.repeat.{cadence}")).to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Step 1 rows: a `[x]`/`[ ]` checkbox + name + cadence + a running marker.
 fn pick_lines<'a>(sched: &'a Scheduler, theme: &Theme, lang: Lang) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::new();
@@ -296,7 +394,7 @@ fn pick_lines<'a>(sched: &'a Scheduler, theme: &Theme, lang: Lang) -> Vec<Line<'
                 .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
         ));
         spans.push(Span::styled(
-            format!("   {}", t.cadence),
+            format!("   {} · {}", kind_label(lang, t), cadence_label(lang, &t.cadence)),
             Style::default().fg(theme.color(Token::Dim)),
         ));
         if t.running {
@@ -362,7 +460,7 @@ fn status_lines<'a>(sched: &'a Scheduler, theme: &Theme, lang: Lang) -> Vec<Line
                 Span::styled("  ⏺ ", Style::default().fg(theme.color(Token::Success))),
                 Span::styled(t.name.clone(), Style::default().fg(theme.color(Token::Text))),
                 Span::styled(
-                    format!("   {}", t.cadence),
+                    format!("   {}", cadence_label(lang, &t.cadence)),
                     Style::default().fg(theme.color(Token::Dim)),
                 ),
             ]));
@@ -483,7 +581,7 @@ mod tests {
     fn scheduler_renders_each_step() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         for step in [SchedStep::Pick, SchedStep::Confirm, SchedStep::Status] {
             let mut s = Scheduler::new(tasks());
             s.sel = 1;
@@ -496,5 +594,71 @@ mod tests {
             let text: String = buf.content().iter().map(|c| c.symbol()).collect();
             assert!(text.contains("Scheduler"), "step {step:?} paints a title");
         }
+    }
+
+    /// `discover_tasks` reads the REAL sources: every `reflect/*.py` (non-`_`,
+    /// minus `scheduler.py`) becomes a `"reflect"`-cadence mode row, and every
+    /// `sche_tasks/*.json` becomes a cron row whose cadence is the legal `repeat`
+    /// label and whose pre-tick follows `enabled`. The HH:MM `schedule` is NEVER
+    /// surfaced as a cadence (the old fake-`09:00` bug).
+    #[test]
+    fn scheduler_discovers_reflect_and_cron() {
+        let root = std::env::temp_dir().join(format!("tui_v4_sched_disc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("reflect")).unwrap();
+        std::fs::create_dir_all(root.join("sche_tasks")).unwrap();
+        // reflect modes: two real, one private (`_`-prefixed, skipped), plus the
+        // cron engine `scheduler.py` (skipped).
+        std::fs::write(root.join("reflect").join("autonomous.py"), "x").unwrap();
+        std::fs::write(root.join("reflect").join("goal_mode.py"), "x").unwrap();
+        std::fs::write(root.join("reflect").join("_helper.py"), "x").unwrap();
+        std::fs::write(root.join("reflect").join("scheduler.py"), "x").unwrap();
+        // cron tasks: an enabled daily one, a disabled every_30m one.
+        std::fs::write(
+            root.join("sche_tasks").join("crypto_morning_brief.json"),
+            r#"{"schedule":"08:30","repeat":"daily","enabled":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("sche_tasks").join("linuxdo_monitor.json"),
+            r#"{"schedule":"00:00","repeat":"every_30m","enabled":false}"#,
+        )
+        .unwrap();
+
+        let tasks = discover_tasks(&root);
+        // 2 reflect modes (autonomous, goal_mode) + 2 cron tasks. No `_helper`, no
+        // `scheduler` engine row.
+        assert_eq!(tasks.len(), 4, "2 reflect modes + 2 cron tasks");
+        assert!(!tasks.iter().any(|t| t.name == "scheduler"), "cron engine is skipped");
+        assert!(!tasks.iter().any(|t| t.name == "_helper"), "private scripts skipped");
+
+        let goal = tasks.iter().find(|t| t.name == "goal_mode").expect("goal_mode mode row");
+        assert_eq!(goal.cadence, "reflect", "reflect modes carry the 'reflect' cadence");
+        assert!(!goal.running, "reflect modes start un-ticked (running probed separately)");
+
+        let brief = tasks.iter().find(|t| t.name == "crypto_morning_brief").expect("cron row");
+        assert_eq!(brief.cadence, "daily", "cron cadence is the legal repeat label, not 08:30");
+        assert!(brief.running, "enabled cron task is pre-ticked");
+        let lx = tasks.iter().find(|t| t.name == "linuxdo_monitor").expect("cron row");
+        assert_eq!(lx.cadence, "every_30m");
+        assert!(!lx.running, "disabled cron task is not pre-ticked");
+        // No fake HH:MM cadence anywhere.
+        assert!(!tasks.iter().any(|t| t.cadence.contains(':')), "no HH:MM cadence labels");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `reflect/` or `sche_tasks/` on disk, `discover_tasks` returns empty
+    /// (so the open path falls back to [`default_tasks`] — never a blank overlay).
+    #[test]
+    fn scheduler_falls_back_to_default_on_empty() {
+        let root = std::env::temp_dir().join(format!("tui_v4_sched_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(discover_tasks(&root).is_empty(), "no sources → empty discovery");
+        // The caller's fallback (mirrored here) yields the representative set.
+        let tasks = if discover_tasks(&root).is_empty() { default_tasks() } else { discover_tasks(&root) };
+        assert!(!tasks.is_empty(), "fallback yields the default task set");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

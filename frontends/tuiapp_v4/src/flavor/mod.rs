@@ -146,11 +146,17 @@ pub fn heat_bold(elapsed_ms: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Gerund pool — the full 34-word set (verbatim from tui_v3 SPINNER_GERUNDS).
+// Gerund pool — bilingual (Q12 / C5 F9). The base 34 are ported verbatim from
+// tui_v3 `SPINNER_GERUNDS`; the C5 appendix appends 7 genuinely-NEW eggs (the
+// appendix's other "new" words — Sleuthing/Reticulating/Spelunking/Conjuring/
+// Marinating/Untangling — already live in the base set, so appending them would
+// duplicate; only the 7 not-already-present are added). `GERUNDS_ZH` is the
+// PARALLEL Simplified-Chinese pool, SAME length (the `gerunds_parity` guard).
 // ---------------------------------------------------------------------------
 
-/// The 34-word gerund pool (English-only by design; ported from tui_v3
-/// `SPINNER_GERUNDS`). Rotates every ~6s so a long wait feels alive.
+/// The English gerund pool (ported from tui_v3 `SPINNER_GERUNDS` + 7 C5-appendix
+/// eggs). Rotates every ~6s so a long wait feels alive. `GERUNDS_ZH` mirrors it
+/// index-for-index; the two MUST stay the same length (`gerunds_parity`).
 pub const GERUNDS: &[&str] = &[
     "Pondering",
     "Reticulating",
@@ -186,24 +192,90 @@ pub const GERUNDS: &[&str] = &[
     "Resolving",
     "Reaping",
     "Tuning",
+    // -- C5-appendix eggs (the 7 not already present above) -------------------
+    "Percolating",
+    "Bamboozling",
+    "Galaxy-braining",
+    "Vibing",
+    "Summoning daemons",
+    "Bikeshedding",
+    "Yak-shaving",
+];
+
+/// The Simplified-Chinese gerund pool — PARALLEL to [`GERUNDS`] (same length,
+/// translated index-for-index). A zh user sees `沉思中…` where an en user sees
+/// `Pondering…`. The `gerunds_parity` test pins `GERUNDS.len() == GERUNDS_ZH.len()`.
+pub const GERUNDS_ZH: &[&str] = &[
+    "沉思中",       // Pondering
+    "织网中",       // Reticulating
+    "探案中",       // Sleuthing
+    "孵化中",       // Hatching
+    "扑击中",       // Pouncing
+    "酝酿中",       // Brewing
+    "磨刀中",       // Sharpening
+    "解结中",       // Untangling
+    "编译中",       // Compiling
+    "抽丝剥茧中",   // Unraveling
+    "提炼中",       // Distilling
+    "校准中",       // Calibrating
+    "腌制中",       // Marinating
+    "施法中",       // Conjuring
+    "觅食中",       // Foraging
+    "探洞中",       // Spelunking
+    "合成中",       // Synthesizing
+    "重构思路中",   // Refactoring thoughts
+    "循迹面包屑",   // Tracing breadcrumbs
+    "钻兔子洞中",   // Following the rabbit hole
+    "路由中",       // Routing
+    "穿线中",       // Threading
+    "轮询中",       // Polling
+    "运转中",       // Spinning
+    "挂钩中",       // Hooking
+    "打补丁中",     // Patching
+    "缓存中",       // Caching
+    "让步中",       // Yielding
+    "注水中",       // Hydrating
+    "折叠中",       // Folding
+    "流式中",       // Streaming
+    "解析中",       // Resolving
+    "回收中",       // Reaping
+    "调优中",       // Tuning
+    // -- C5-appendix eggs (parallel to the EN tail) ---------------------------
+    "渗滤中",       // Percolating
+    "谋划中",       // Bamboozling
+    "烧脑中",       // Galaxy-braining
+    "找感觉中",     // Vibing
+    "召唤守护进程", // Summoning daemons
+    "纠结细节中",   // Bikeshedding
+    "剃牦牛中",     // Yak-shaving
 ];
 
 /// Number of 0.1s ticks per gerund step (~6s rotation: 60 ticks × 0.1s = 6s).
 pub const GERUND_TICKS_PER_STEP: u64 = 60;
 
-/// Pick a gerund for a slow rotation by an explicit STEP INDEX. Deterministic:
-/// `gerund_at(k)` is `GERUNDS[k % 34]`. This is the pure core the
-/// `gerund_rotation_deterministic` test pins, and what a turn-indexed rotation
-/// (advance one word per turn) calls directly.
-pub fn gerund_at(step: u64) -> &'static str {
-    GERUNDS[(step % GERUNDS.len() as u64) as usize]
+/// The gerund pool for a language. PURE.
+pub fn gerunds_for(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::En => GERUNDS,
+        Lang::Zh => GERUNDS_ZH,
+    }
 }
 
-/// Pick a gerund for the 0.1s tick clock: rotates one word every ~6s. `tick` is
-/// the 0.1s counter, so the step is `tick / 60`. Deterministic (no wall-clock,
-/// no randomness) — a redraw within the same 6s window shows the SAME word.
-pub fn gerund(tick: u64) -> &'static str {
-    gerund_at(tick / GERUND_TICKS_PER_STEP)
+/// Pick a gerund for a slow rotation by an explicit STEP INDEX, in `lang`.
+/// Deterministic: `gerund_at(lang, k)` is `pool[k % pool.len()]`. This is the
+/// pure core the `gerund_rotation_deterministic` test pins, and what a frozen
+/// turn-indexed readout (e.g. the done-line) calls directly.
+pub fn gerund_at(lang: Lang, step: u64) -> &'static str {
+    let pool = gerunds_for(lang);
+    pool[(step % pool.len() as u64) as usize]
+}
+
+/// Pick a gerund for the 0.1s tick clock, in `lang`: rotates one word every ~6s.
+/// `tick` is the 0.1s counter, so the step is `tick / 60`. Deterministic (no
+/// wall-clock, no randomness) — a redraw within the same 6s window shows the
+/// SAME word, and the pool is selected by the interface language (Q12).
+pub fn gerund(lang: Lang, tick: u64) -> &'static str {
+    gerund_at(lang, tick / GERUND_TICKS_PER_STEP)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,35 +474,51 @@ mod tests {
     }
 
     /// THE deliverable test: gerund rotation is deterministic — a pure function
-    /// of the integer tick (no randomness, no wall-clock). The same tick always
-    /// yields the same word; it advances exactly once per ~6s window and wraps
-    /// over the full 34-word pool.
+    /// of `(lang, tick)` (no randomness, no wall-clock). The same tick always
+    /// yields the same word; it advances exactly once per ~6s window, wraps over
+    /// the whole pool, and PICKS THE POOL BY LANGUAGE (Q12: zh pool for `Lang::Zh`).
     #[test]
     fn gerund_rotation_deterministic() {
-        // The pool is the full 34 words (the spec calls for 34).
-        assert_eq!(GERUNDS.len(), 34);
+        let n = GERUNDS.len() as u64;
 
-        // Step index → word is GERUNDS[step % 34], and pinned exactly.
-        assert_eq!(gerund_at(0), "Pondering");
-        assert_eq!(gerund_at(1), "Reticulating");
-        assert_eq!(gerund_at(33), "Tuning");
-        assert_eq!(gerund_at(34), "Pondering"); // wraps over the whole pool.
-        assert_eq!(gerund_at(34 + 5), gerund_at(5)); // periodic with period 34.
+        // Step index → word is pool[step % n], and pinned exactly (en).
+        assert_eq!(gerund_at(Lang::En, 0), "Pondering");
+        assert_eq!(gerund_at(Lang::En, 1), "Reticulating");
+        assert_eq!(gerund_at(Lang::En, 33), "Tuning");
+        assert_eq!(gerund_at(Lang::En, n), "Pondering"); // wraps over the whole pool.
+        assert_eq!(gerund_at(Lang::En, n + 5), gerund_at(Lang::En, 5)); // periodic.
 
         // The 0.1s-tick view holds ONE word for a full 6s window (ticks 0..59),
         // then steps at tick 60 — and is identical for any tick in the window
         // (a redraw never jitters the word).
         for t in 0..GERUND_TICKS_PER_STEP {
-            assert_eq!(gerund(t), "Pondering", "tick {t} must stay on word 0");
+            assert_eq!(gerund(Lang::En, t), "Pondering", "tick {t} must stay on word 0");
         }
-        assert_eq!(gerund(GERUND_TICKS_PER_STEP), "Reticulating");
-        assert_eq!(gerund(GERUND_TICKS_PER_STEP * 33), "Tuning");
-        assert_eq!(gerund(GERUND_TICKS_PER_STEP * 34), "Pondering"); // full wrap.
+        assert_eq!(gerund(Lang::En, GERUND_TICKS_PER_STEP), "Reticulating");
+        assert_eq!(gerund(Lang::En, GERUND_TICKS_PER_STEP * 33), "Tuning");
+        assert_eq!(gerund(Lang::En, GERUND_TICKS_PER_STEP * n), "Pondering"); // full wrap.
 
-        // Purity: calling twice with the same tick returns the SAME word.
-        assert_eq!(gerund(777), gerund(777));
+        // Q12: `Lang::Zh` selects the parallel zh pool — same index, zh word.
+        assert_eq!(gerund_at(Lang::Zh, 0), "沉思中");
+        assert_eq!(gerund_at(Lang::Zh, 1), "织网中");
+        assert_eq!(gerund(Lang::Zh, 0), GERUNDS_ZH[0]);
+        assert_ne!(gerund_at(Lang::Zh, 0), gerund_at(Lang::En, 0));
+
+        // Purity: calling twice with the same (lang, tick) returns the SAME word.
+        assert_eq!(gerund(Lang::En, 777), gerund(Lang::En, 777));
         // And it is the static pool entry it indexes (value equality).
-        assert_eq!(gerund(0), GERUNDS[0]);
+        assert_eq!(gerund(Lang::En, 0), GERUNDS[0]);
+    }
+
+    /// THE Q12 parity guard: the en/zh gerund pools are the SAME length, so every
+    /// English egg has a Chinese sibling at the same index (no index can pick a
+    /// word in one language but fall out of range in the other).
+    #[test]
+    fn gerunds_parity() {
+        assert_eq!(GERUNDS.len(), GERUNDS_ZH.len(), "en/zh gerund pools must match length");
+        // No empty entries on either side (a blank gerund would read as a gap).
+        assert!(GERUNDS.iter().all(|g| !g.is_empty()));
+        assert!(GERUNDS_ZH.iter().all(|g| !g.is_empty()));
     }
 
     #[test]

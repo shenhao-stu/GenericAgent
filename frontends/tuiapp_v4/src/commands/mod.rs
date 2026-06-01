@@ -15,6 +15,7 @@
 //! unit-tested; `run_shell` is the thin effectful wrapper that spawns the child
 //! with a timeout (decoded `from_utf8_lossy` for Chinese-Windows safety).
 
+pub mod dispatch;
 pub mod registry;
 
 use std::io::Read;

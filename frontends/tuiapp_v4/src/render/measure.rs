@@ -24,6 +24,7 @@
 //! `copy_across_wrap_has_no_newline` in [`crate::render::copy`]).
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -100,6 +101,26 @@ pub fn wrap_line(line: &str, avail: usize) -> Vec<String> {
 ///   * Prefer breaking at the last space before the limit (word wrap, less/lazygit
 ///     style); fall back to a hard cell-break when a single token exceeds `avail`.
 pub fn wrap_line_segments(line: &str, avail: usize) -> Vec<WrapSegment> {
+    wrap_line_segments_atomic(line, avail, &[])
+}
+
+/// Wrap like [`wrap_line_segments`], but treat each byte range in `atomic_ranges`
+/// as an **indivisible unit**: the wrapper never breaks inside it and never treats
+/// a space inside it as a word boundary; if it doesn't fit the remaining cells of
+/// the current row it moves whole to the next row (a range wider than the whole
+/// `avail` overflows onto its own row, never split — same overflow-by-1 rule as a
+/// too-wide glyph). Empty `atomic_ranges` is byte-identical to [`wrap_line_segments`].
+///
+/// This is the shared wrapper that keeps inline-math glyph runs intact in BOTH the
+/// styled draw ([`crate::markdown::wrap_styled_line`]) and the plain wrap cache
+/// ([`reflow_block`]) — both feed the SAME atomic ranges (the math spans' byte
+/// extents in the rendered line), so the row count stays identical (P1). Ranges
+/// MUST be sorted, non-overlapping, and aligned to grapheme-cluster boundaries.
+pub fn wrap_line_segments_atomic(
+    line: &str,
+    avail: usize,
+    atomic_ranges: &[Range<usize>],
+) -> Vec<WrapSegment> {
     let avail = avail.max(1);
     if line.is_empty() {
         return vec![WrapSegment {
@@ -116,7 +137,7 @@ pub fn wrap_line_segments(line: &str, avail: usize) -> Vec<WrapSegment> {
     let mut cur = String::new();
     let mut cur_cells = 0usize;
     let mut word_byte: Option<usize> = None;
-    // Whether the grapheme we just appended was a space (to detect word starts).
+    // Whether the token we just appended was a space (to detect word starts).
     let mut prev_space = false;
     // Provenance of the break that PRECEDES the row currently being accumulated:
     // true if that soft break consumed a space (word wrap), false if mid-word.
@@ -136,24 +157,29 @@ pub fn wrap_line_segments(line: &str, avail: usize) -> Vec<WrapSegment> {
         }};
     }
 
-    for g in line.graphemes(true) {
-        let gw = UnicodeWidthStr::width(g);
-        let is_space = g == " ";
+    // Iterate UNITS: each unit is either a single grapheme cluster or a whole
+    // atomic range (consumed as one). With no atomic ranges every unit is a single
+    // grapheme, so the loop is byte-for-byte the grapheme version (the no-atomic
+    // contract). An atomic unit is never a space, so its interior spaces can't be
+    // a word break, and a unit wider than `avail` overflows whole.
+    for (unit, uw) in atomic_units(line, atomic_ranges) {
+        let is_space = unit == " ";
 
         // A new word begins at the first non-space after a space (or row start).
         if !is_space && (prev_space || cur.is_empty()) {
             word_byte = Some(cur.len());
         }
 
-        // A grapheme wider than the whole row (a wide glyph at avail==1): flush
-        // the row, then emit the glyph alone (overflow by 1 beats an infinite
-        // loop). It cannot be word-broken → its preceding break is mid-word.
-        if gw > avail {
+        // A unit wider than the whole row (a wide glyph at avail==1, or an atomic
+        // run longer than `avail`): flush the row, then emit the unit alone
+        // (overflow by 1+ beats an infinite loop / a split formula). It cannot be
+        // word-broken → its preceding break is mid-word.
+        if uw > avail {
             if !cur.is_empty() {
                 flush!(false);
             }
             out.push(WrapSegment {
-                text: g.to_string(),
+                text: unit.to_string(),
                 broke_at_word_boundary: pending_word_boundary,
             });
             pending_word_boundary = false;
@@ -162,7 +188,7 @@ pub fn wrap_line_segments(line: &str, avail: usize) -> Vec<WrapSegment> {
             continue;
         }
 
-        if cur_cells + gw > avail {
+        if cur_cells + uw > avail {
             // Row is full. Prefer breaking before the in-progress word so it moves
             // down whole — but only if that word doesn't start at column 0 (else
             // the word itself is longer than the row and we must hard-break it).
@@ -202,8 +228,8 @@ pub fn wrap_line_segments(line: &str, avail: usize) -> Vec<WrapSegment> {
             continue;
         }
 
-        cur.push_str(g);
-        cur_cells += gw;
+        cur.push_str(unit);
+        cur_cells += uw;
         prev_space = is_space;
     }
     if !cur.is_empty() || out.is_empty() {
@@ -214,6 +240,46 @@ pub fn wrap_line_segments(line: &str, avail: usize) -> Vec<WrapSegment> {
         });
     }
     out
+}
+
+/// Split `line` into wrap UNITS in order: each byte range in `atomic_ranges` is one
+/// unit (kept whole), and everything outside the ranges is split into single
+/// grapheme clusters. Yields `(text, display_width)` per unit. With no ranges every
+/// unit is a single grapheme (the no-atomic identity). PURE.
+///
+/// `atomic_ranges` must be sorted, non-overlapping, within `0..=line.len()`, and on
+/// grapheme boundaries; out-of-order / overlapping entries are skipped defensively
+/// so a bad caller can never panic or drop text.
+fn atomic_units<'a>(line: &'a str, atomic_ranges: &[Range<usize>]) -> Vec<(&'a str, usize)> {
+    let mut units: Vec<(&str, usize)> = Vec::new();
+    let mut pos = 0usize;
+    let mut ai = 0usize;
+    while pos < line.len() {
+        // Advance past any ranges we've already passed (defensive against unsorted).
+        while ai < atomic_ranges.len() && atomic_ranges[ai].end <= pos {
+            ai += 1;
+        }
+        if ai < atomic_ranges.len()
+            && atomic_ranges[ai].start == pos
+            && atomic_ranges[ai].end > pos
+            && atomic_ranges[ai].end <= line.len()
+            && line.is_char_boundary(atomic_ranges[ai].end)
+        {
+            let r = &line[pos..atomic_ranges[ai].end];
+            units.push((r, UnicodeWidthStr::width(r)));
+            pos = atomic_ranges[ai].end;
+            ai += 1;
+            continue;
+        }
+        // One grapheme cluster from `pos`.
+        let g = line[pos..].graphemes(true).next().unwrap_or("");
+        if g.is_empty() {
+            break;
+        }
+        units.push((g, UnicodeWidthStr::width(g)));
+        pos += g.len();
+    }
+    units
 }
 
 /// Drop trailing ASCII spaces from a wrapped segment so a word-wrap break never
@@ -233,8 +299,12 @@ pub fn reflow_block(block: &Block, width: u16) -> Vec<VisualLine> {
     let avail = (width as usize).max(1);
     let mut out: Vec<VisualLine> = Vec::new();
     let mut intra = 0usize;
-    for hard in block.hard_lines() {
-        let segments = wrap_line_segments(hard, avail);
+    for (hi, hard) in block.hard_lines().into_iter().enumerate() {
+        // Per-hard-line atomic ranges (rendered inline-math runs); empty for the
+        // common case → ordinary wrapping. Same ranges the styled draw uses (P1).
+        let empty: Vec<Range<usize>> = Vec::new();
+        let ranges = block.atomic_ranges.get(hi).unwrap_or(&empty);
+        let segments = wrap_line_segments_atomic(hard, avail, ranges);
         for (seg_idx, seg) in segments.into_iter().enumerate() {
             let cells = UnicodeWidthStr::width(seg.text.as_str());
             out.push(VisualLine {
@@ -344,6 +414,15 @@ impl WrapCache {
             self.per_block.clear(); // every entry is now stale.
         }
         self.sync(blocks);
+    }
+
+    /// Drop the per-block memo so the next [`WrapCache::sync`] reflows EVERY block —
+    /// used when a block's PROJECTION changed without its `rev` (a fold toggle:
+    /// expanding/collapsing a node changes its rendered rows but not its source
+    /// `rev`, so the `(id, rev)` reuse would otherwise keep stale rows). Width is
+    /// unchanged. PURE-ish (clears a cache).
+    pub fn invalidate_all(&mut self) {
+        self.per_block.clear();
     }
 
     fn recompute_prefix(&mut self) {
@@ -530,6 +609,83 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    // ---- atomic (never-split) wrap (Fix A: inline math) ---------------------
+
+    fn texts(segs: Vec<WrapSegment>) -> Vec<String> {
+        segs.into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn atomic_empty_ranges_is_identical_to_plain() {
+        // The no-atomic contract: empty ranges == the grapheme wrapper, byte-for-byte,
+        // across the cases the plain wrapper is tested on.
+        for (line, w) in [
+            ("hello world", 7usize),
+            ("abcdefghij", 4),
+            ("你好世界", 4),
+            ("ab你好", 4),
+            ("the quick brown fox", 8),
+            ("", 5),
+        ] {
+            assert_eq!(
+                wrap_line_segments_atomic(line, w, &[]),
+                wrap_line_segments(line, w),
+                "atomic with empty ranges must equal plain for {line:?}@{w}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_run_with_internal_spaces_never_splits() {
+        // `a + b + c` is one atomic unit: its interior spaces are NOT word breaks,
+        // so it stays whole on one row even though the row is far narrower than it.
+        let line = "x a + b + c y";
+        // Bytes of the atomic run "a + b + c" (after "x ").
+        let start = line.find("a + b + c").unwrap();
+        let ranges = [start..start + "a + b + c".len()];
+        let rows = texts(wrap_line_segments_atomic(line, 5, &ranges));
+        assert!(
+            rows.iter().any(|r| r == "a + b + c"),
+            "atomic run kept whole on a row: {rows:?}"
+        );
+        // It is never broken across two rows.
+        for r in &rows {
+            assert!(
+                !(r.contains("a +") && !r.contains("a + b + c")),
+                "atomic run was split: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_run_wider_than_avail_overflows_whole() {
+        // A single atomic unit wider than the whole row overflows onto its OWN row
+        // intact (the overflow-by-1+ rule), never hard-broken by cells.
+        let line = "pre AAAAAAAAAA post"; // the run is 10 wide, avail 4
+        let start = line.find("AAAAAAAAAA").unwrap();
+        let ranges = [start..start + 10];
+        let rows = texts(wrap_line_segments_atomic(line, 4, &ranges));
+        assert!(rows.iter().any(|r| r == "AAAAAAAAAA"), "overflow whole: {rows:?}");
+        // Without the atomic range the same token IS hard-broken (proves the range
+        // is what protects it).
+        let plain = texts(wrap_line_segments(line, 4));
+        assert!(
+            !plain.iter().any(|r| r == "AAAAAAAAAA"),
+            "plain wrap hard-breaks the long token: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn atomic_run_moves_whole_to_next_row_when_it_does_not_fit() {
+        // The run fits the width on its own but not in the current row's remainder:
+        // it must move down whole (word-wrap), not split.
+        let line = "abcd EFGH"; // run "EFGH" width 4, avail 6: "abcd" then "EFGH"
+        let start = line.find("EFGH").unwrap();
+        let ranges = [start..start + 4];
+        let rows = texts(wrap_line_segments_atomic(line, 6, &ranges));
+        assert_eq!(rows, vec!["abcd", "EFGH"], "atomic run moved down whole: {rows:?}");
+    }
+
     // ---- reflow + provenance -------------------------------------------------
 
     #[test]
@@ -554,6 +710,36 @@ mod tests {
             assert_eq!(vl.intra, i);
             assert_eq!(vl.block_id, 1);
         }
+    }
+
+    #[test]
+    fn reflow_honors_per_hard_line_atomic_ranges() {
+        // A block whose 2nd hard line carries an atomic run wider than the width:
+        // the cache keeps it as ONE visual row (it would otherwise hard-break it),
+        // while the 1st (range-free) hard line wraps normally. This is the per-hard-
+        // line indexing the styled draw relies on for math parity (P1).
+        let src = "alpha beta\nKEEPWHOLEXX tail";
+        let run_start = src.find("KEEPWHOLEXX").unwrap();
+        // The atomic range is in HARD-LINE-1's LOCAL coordinates (after the `\n`).
+        let line1_start = src.find('\n').unwrap() + 1;
+        let local = (run_start - line1_start)..(run_start - line1_start + "KEEPWHOLEXX".len());
+        let block = Block::finalized(1, BlockRole::Assistant, src)
+            .with_atomic_ranges(vec![Vec::new(), vec![local]]);
+        let with = reflow_block(&block, 6);
+        assert!(
+            with.iter().any(|v| v.text == "KEEPWHOLEXX"),
+            "atomic run kept whole by the cache: {:?}",
+            with.iter().map(|v| &v.text).collect::<Vec<_>>()
+        );
+        // Same block WITHOUT ranges hard-breaks the long token (proves the ranges
+        // are load-bearing, not incidental).
+        let plain = Block::finalized(1, BlockRole::Assistant, src);
+        let without = reflow_block(&plain, 6);
+        assert!(
+            !without.iter().any(|v| v.text == "KEEPWHOLEXX"),
+            "without ranges the token splits: {:?}",
+            without.iter().map(|v| &v.text).collect::<Vec<_>>()
+        );
     }
 
     // ---- cache: prefix sums, per-rev reuse, window --------------------------

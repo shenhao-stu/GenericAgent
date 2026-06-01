@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn rainbow_7_stops() {
         // Exactly 7 stops, and the gradient endpoints match the first/last theme tokens.
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let stops = theme.rainbow();
         assert_eq!(stops.len(), 7);
         let g = gradient(stops, 64);
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn flow_color_is_cyclic_and_moves() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let stops = theme.rainbow();
         // Seamless loop: t=0 and t=1 (≡0) match; the midpoint differs (it moves).
         assert_eq!(flow_color(stops, 0.0), flow_color(stops, 1.0));
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn gradient_edge_cases() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let stops = theme.rainbow();
         assert!(gradient(stops, 0).is_empty());
         assert_eq!(gradient(stops, 1), vec![stops[0]]);
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn separator_mono_is_plain() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let caps = ColorCaps::mono();
         let spans = separator_spans(&theme, &caps, 10, None);
         // One plain span, no fg color.
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn separator_color_has_per_column_spans() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let caps = ColorCaps::from_env_values(false, "truecolor", "xterm-256color");
         let spans = separator_spans(&theme, &caps, 12, None);
         assert_eq!(spans.len(), 12);
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn separator_shimmer_variant_differs() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let caps = ColorCaps::from_env_values(false, "truecolor", "xterm-256color");
         let plain = separator_spans(&theme, &caps, 40, None);
         let shimmered = separator_spans(&theme, &caps, 40, Some(0.5));

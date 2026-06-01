@@ -1,26 +1,32 @@
-//! app/mod.rs — AppState + the pure reducers that fold bridge events into it.
-//!
-//! The UI plane is immediate-mode: each frame `render()` reads this state. The
-//! event loop pushes bridge frames + ticks + key events in; the reducers here
-//! mutate state. Keeping the fold in PURE methods (no I/O, no ratatui) is what
-//! makes the load-bearing behavior unit-testable (ratatui widgets can't be
-//! headlessly TTY-tested — §"Keep all load-bearing logic in PURE functions").
+//! app/mod.rs — `AppState`: the whole application state + its construction, the
+//! per-tick clock, the render-plane sync/scroll surface, and the UI→app intent
+//! queue. The value TYPES live in [`types`]; the bridge fold in [`reducer`]
+//! (the ONE [`reducer::apply_frame`] shared by `AppState` + `Session`, killing
+//! the dup); the overlay-stack constructors in [`overlay_ops`]; the multi-session
+//! + view-switch glue in [`multi`]. Keeping the load-bearing logic in PURE
+//! methods (no I/O, no ratatui) is what makes it headlessly unit-testable.
 
 pub mod effort;
+mod fold_hit;
+mod multi;
+mod overlay_ops;
+mod reducer;
 pub mod session;
+mod types;
+
+pub use types::{Block, ConnStatus, CostBreakdown, Overlay, PendingAsk, RenameState, Role, View};
 
 use std::path::PathBuf;
 
 use crate::app::effort::{EffortSlider, ReasoningEffort};
 use crate::app::session::SessionMap;
-use crate::bridge::protocol::{AskUserOption, CoreToUi, LlmItem};
-use crate::bridge::BridgeEvent;
-use crate::components::picker::{AskUserPicker, PickItem, Picker, PickerKind};
+use crate::app_event::AppEvent;
 use crate::effects::{EffectMode, EffectsEngine};
 use crate::flavor::{Lang, PetStyle, SpinnerStyle};
 use crate::input::keychord::ChordState;
 use crate::input::Composer;
-use crate::render::{Block as RenderBlock, BlockRole, Viewport, WrapCache};
+use crate::render::fold::{BlockFolds, NodeId};
+use crate::render::{Block as RenderBlock, Viewport, WrapCache};
 use crate::theme::Theme;
 use crate::util::osc::TabStatus;
 
@@ -29,325 +35,14 @@ use crate::util::osc::TabStatus;
 /// remaining a pure function of the integer tick count.
 pub const TICK_DT: f32 = 0.1;
 
-/// The active modal OVERLAY stacked over the current view (§3 "overlay stack:
-/// palette, pickers, session dashboard, /workflows, ask-user, help, copy-mode").
-/// At most one is up at a time (the cockpit + dashboard are VIEWS; these are
-/// transient modals dismissed with `Esc`). The slash dispatcher opens them; the
-/// key handler routes keys into the active one before the composer sees them.
-#[derive(Debug, Clone)]
-pub enum Overlay {
-    /// A reusable list picker (`/llm` `/theme` `/emoji` `/language` `/export`
-    /// `/rewind` `/continue` `/scheduler`). Carries the picker model + a snapshot
-    /// of the pre-preview theme so a live-preview picker can REVERT on `Esc`.
-    Picker {
-        picker: Picker,
-        /// The theme to restore on `Esc` for a live-preview picker (`/theme` etc).
-        theme_backup: Option<Theme>,
-    },
-    /// The unified ask_user card (single / multi / numeric).
-    AskUser(AskUserPicker),
-    /// `/help` — the full command-list overlay.
-    Help,
-    /// `/status` `/sessions` — model / state / rounds / context / cwd snapshot.
-    Status,
-    /// `/cost [all]` — token-usage report (input/output/cache/context%).
-    Cost,
-    /// `/verbose` `/tools` `/trace` — full-screen tool-call audit.
-    Verbose,
-    /// A transient text card (e.g. `/btw`'s answer box) above the composer; the
-    /// `querying…` → answer flow. Dismissed with `Esc`, no history pollution. The
-    /// `ask_id` ties an incoming `BtwAnswer` frame back to THIS card so a stale card
-    /// (the user fired a second `/btw`) can't show the wrong answer.
-    Btw { ask_id: String, question: String, answer: Option<String> },
-    /// The `/scheduler` 3-step flow card (multi-pick reflect tasks → confirm
-    /// start/stop diff → apply + cron status). The whole flow is one overlay whose
-    /// internal `step` advances on Enter; Esc steps back / closes (§7).
-    Scheduler(crate::components::scheduler::Scheduler),
-    /// The `/continue` searchable session picker (content-grep + lazy load over the
-    /// `model_responses_*.txt` logs → restore via the existing restore path, §4).
-    Continue(crate::components::continue_picker::ContinuePicker),
-    /// The `/effects demo` splash overlay (§9): a transient centered panel that shows
-    /// every effect at once (fire band + snow + lightning + sparkle) and auto-reverts
-    /// after a few seconds. Modal-but-trivial: any key closes it early.
-    Effects,
-    /// The `/effort` slider overlay (redesign_cc.md §3): a `Faster ←——▲——→ Smarter`
-    /// horizontal slider over the `low medium high xhigh max` stops with a `▲` marker
-    /// on the chosen level. ←/→ moves the marker; Enter forwards
-    /// `/session.reasoning_effort=<level>` (max→xhigh) to the bridge; Esc cancels.
-    EffortSlider(EffortSlider),
-}
+/// How long a memoized `@`-picker file-index snapshot stays fresh before
+/// [`AppState::list_project_files`] re-walks the repo tree (Q12 @ speed). 5s is a
+/// coarse debounce (CC-style, not an async actor): fluid enough that typing in the
+/// picker never pays a walk, yet short enough that a newly-created file is
+/// `@`-completable within a few seconds. The walk is bounded by `MAX_INDEXED_FILES`
+/// either way; the TTL just collapses the 3×/frame re-walk into ≤1 walk per window.
+const FILE_INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-impl Overlay {
-    /// True if this overlay is the FULL-SCREEN kind (help / status / cost /
-    /// verbose) vs a compact centered card (picker / ask / btw). The renderer uses
-    /// it to size the overlay region.
-    pub fn is_fullscreen(&self) -> bool {
-        matches!(self, Overlay::Help | Overlay::Status | Overlay::Cost | Overlay::Verbose)
-    }
-
-    /// True if this overlay is MODAL — it captures keyboard input (the picker /
-    /// ask-user / help / status / cost / verbose / scheduler / continue). A
-    /// NON-modal overlay (the `/btw` card) is a transient toast that floats above
-    /// the composer WITHOUT stealing input, so "chat stays usable" while a side
-    /// question is in flight (§7 `/btw` "non-blocking (chat stays usable)"). Only
-    /// `Esc` dismisses a non-modal card; every other key flows to the cockpit.
-    pub fn is_modal(&self) -> bool {
-        !matches!(self, Overlay::Btw { .. })
-    }
-}
-
-/// The connection lifecycle, reflecting the REAL handshake (N1). The status word
-/// the UI shows is derived straight from this — never a guessed "disconnected".
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConnStatus {
-    /// Spawned, awaiting the `Ready` frame.
-    Connecting,
-    /// `Ready` received. Carries the model name if the core reported one.
-    Connected { model: Option<String> },
-    /// The bridge failed or the child exited. Carries the real reason so the UI
-    /// shows "disconnected: <reason>" (the N1 anti-silent-failure requirement).
-    Disconnected { reason: String },
-}
-
-impl ConnStatus {
-    /// The short human status word for the footer/header.
-    pub fn label(&self) -> String {
-        match self {
-            ConnStatus::Connecting => "connecting…".to_string(),
-            ConnStatus::Connected { model } => match model {
-                Some(m) => format!("connected {m}"),
-                None => "connected".to_string(),
-            },
-            ConnStatus::Disconnected { reason } => format!("disconnected: {reason}"),
-        }
-    }
-}
-
-/// Which full-screen VIEW the app is showing. The dashboard (§6 / N2) is a
-/// SEPARATE full-screen view — entered via left-click on the sessions area OR
-/// `Ctrl+S`, exited via `Esc` — NOT a sidebar crowding the composer (the rejected
-/// v0.1 design). Future overlays (pickers, /workflows) stack on top of these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum View {
-    /// The normal chat cockpit (header / transcript / composer / footer).
-    #[default]
-    Cockpit,
-    /// The full-screen Claude-Code-style session dashboard.
-    Dashboard,
-    /// The full-screen `/workflows` panel (conductor / hive / goal — §7). Reached
-    /// via `/workflows` `/conductor` `/hive` `/goal`; `Esc` returns to the cockpit.
-    /// Backed by the singleton workflow watcher (its own threads, never blocks
-    /// chat); the panel only tracks the focus + render style.
-    Workflows,
-}
-
-/// A pending rename in the dashboard: the session id being renamed + the current
-/// edit buffer. `r` opens it; typing edits; Enter commits; Esc cancels.
-#[derive(Debug, Clone, Default)]
-pub struct RenameState {
-    pub id: u64,
-    pub buffer: String,
-}
-
-/// The author of a transcript block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-    Tool,
-    /// An out-of-band bridge/system notice (errors, child exit, stderr).
-    Notice,
-}
-
-impl Role {
-    /// Map a protocol role string onto a [`Role`].
-    pub fn from_proto(s: &str) -> Role {
-        match s {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            "system" => Role::System,
-            "tool" => Role::Tool,
-            _ => Role::Assistant,
-        }
-    }
-}
-
-/// One logical transcript block. Stores SOURCE text — the only width-independent
-/// truth. The render plane derives soft-wrapped rows + the viewport window from
-/// `(id, source, rev)` (P1) and copies `source` verbatim (P2); nothing is ever
-/// re-derived from rendered rows. `mid` ties streaming deltas to their block;
-/// `id` is the STABLE, monotonic anchor key (never reused, so a scroll anchor
-/// survives appends); `rev` bumps on every mutation to drive cache invalidation.
-#[derive(Debug, Clone)]
-pub struct Block {
-    pub id: u64,
-    pub mid: Option<String>,
-    pub role: Role,
-    pub source: String,
-    /// Monotonic content version; bumped on stream-append / finalize so the wrap
-    /// cache reflows only this block (untouched blocks reuse cached rows).
-    pub rev: u64,
-    /// True once `MessageEnd` arrived (or for a synchronous block).
-    pub finalized: bool,
-}
-
-impl Block {
-    fn new(id: u64, mid: Option<String>, role: Role, source: String, finalized: bool) -> Self {
-        Block {
-            id,
-            mid,
-            role,
-            source,
-            rev: 1,
-            finalized,
-        }
-    }
-
-    /// Public block constructor for the multi-session plane (`app::session`),
-    /// which owns its own per-session transcripts and id space. Identical to the
-    /// private [`Block::new`]; exposed so `SessionMap` can build blocks without
-    /// reaching into `AppState`'s private allocator.
-    pub fn new_external(
-        id: u64,
-        mid: Option<String>,
-        role: Role,
-        source: String,
-        finalized: bool,
-    ) -> Self {
-        Block::new(id, mid, role, source, finalized)
-    }
-
-    /// A snapshot of this block as a render-plane [`RenderBlock`] (the logical
-    /// unit the wrap cache + viewport consume). Cheap clone of the source; the
-    /// `(id, rev)` pair lets the cache reuse untouched blocks across frames.
-    ///
-    /// For an **assistant** block the wrap cache must count the rows that the
-    /// markdown render actually draws (a table becomes aligned rows, `$$…$$`
-    /// becomes a stacked fraction, a code fence gains a label + gutters), NOT the
-    /// raw markdown source lines — otherwise the styled transcript draw and the
-    /// scroll math would disagree (P1). So we hand the cache the markdown-PLAIN
-    /// projection for assistants. Copy (P2) still reads the original `source`
-    /// (the app `Block`), so the clean-logical-text copy is unaffected.
-    pub fn to_render_block(&self, theme: &Theme, fold_all: bool, width: u16) -> RenderBlock {
-        let source = if self.role == Role::Assistant {
-            // The COCKPIT plain projection (folds + chips applied + structural
-            // stream-commit for the in-flight block) so the wrap cache counts the
-            // rows the styled cockpit draw emits (P1). A FINALIZED block has no
-            // volatile tail, so it goes through the documented finalized-convenience
-            // projection [`render_assistant_cockpit_plain`]; an in-flight block
-            // holds its tail back via the streaming variant. Both paths mirror the
-            // styled draw in `components::transcript` 1:1.
-            if self.finalized {
-                crate::markdown::render_assistant_cockpit_plain(
-                    &self.source,
-                    theme,
-                    fold_all,
-                    width,
-                )
-            } else {
-                let lines = crate::markdown::render_assistant_cockpit_streaming(
-                    &self.source,
-                    theme,
-                    fold_all,
-                    width,
-                    true,
-                );
-                crate::markdown::lines_to_plain(&lines)
-            }
-        } else {
-            self.source.clone()
-        };
-        RenderBlock {
-            id: self.id,
-            role: render_role(self.role),
-            source,
-            rev: self.rev,
-            finalized: self.finalized,
-        }
-    }
-
-    /// This block's render-plane [`BlockRole`] (without a full snapshot). The
-    /// transcript widget uses it to choose the gutter + markdown routing.
-    pub fn render_role(&self) -> BlockRole {
-        render_role(self.role)
-    }
-}
-
-/// Map an app [`Role`] onto the render plane's [`BlockRole`].
-fn render_role(role: Role) -> BlockRole {
-    match role {
-        Role::User => BlockRole::User,
-        Role::Assistant => BlockRole::Assistant,
-        Role::System => BlockRole::System,
-        Role::Tool => BlockRole::Tool,
-        Role::Notice => BlockRole::Notice,
-    }
-}
-
-/// A pending `AskUser` the UI must surface. The Foundation renders it as a
-/// transcript notice; the structured ask-user picker (Phase 3) reads these
-/// fields to build the candidate list + free-text escape.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct PendingAsk {
-    pub ask_id: String,
-    pub question: String,
-    pub options: Vec<AskUserOption>,
-    pub free_text: bool,
-}
-
-/// The token-cost breakdown surfaced by `/cost` (§4: "token usage
-/// input/output/cache/context%"). Live estimates from `Status` frames + a final
-/// aggregation; a pure formatter renders the report card.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct CostBreakdown {
-    /// Cumulative input (prompt) tokens.
-    pub input: u64,
-    /// Cumulative output (completion) tokens.
-    pub output: u64,
-    /// Cumulative cache-read tokens (when the backend reports them).
-    pub cache: u64,
-    /// The last context-window utilization percent reported (0..=100).
-    pub context_percent: Option<f64>,
-    /// Accumulated cost in USD (mirrors `AppState::cost_usd`).
-    pub cost_usd: f64,
-}
-
-impl CostBreakdown {
-    /// The total tokens accounted (input + output). PURE.
-    pub fn total(&self) -> u64 {
-        self.input.saturating_add(self.output)
-    }
-
-    /// Render the `/cost` report card as plain lines (the load-bearing formatter,
-    /// unit-tested). PURE. `model` is the active model name for the header.
-    pub fn report_lines(&self, model: &str) -> Vec<String> {
-        let ctx = match self.context_percent {
-            Some(p) => format!("{p:.0}%"),
-            None => "—".to_string(),
-        };
-        // GA has no per-token price table, so a 0 cost is "unknown", not "free":
-        // show a dash rather than a misleading $0.0000 (a future price map can fill
-        // this in). A real accumulated cost still prints with the `$` suffix.
-        let cost = if self.cost_usd > 0.0 {
-            format!("{:.4}$", self.cost_usd)
-        } else {
-            "—".to_string()
-        };
-        vec![
-            format!("Token usage · {model}"),
-            String::new(),
-            format!("  input    {:>10}", self.input),
-            format!("  output   {:>10}", self.output),
-            format!("  cache    {:>10}", self.cache),
-            format!("  total    {:>10}", self.total()),
-            String::new(),
-            format!("  context  {ctx:>10}"),
-            format!("  cost     {cost:>10}"),
-        ]
-    }
-}
 
 /// The whole application state for the Foundation slice.
 #[derive(Debug)]
@@ -373,8 +68,16 @@ pub struct AppState {
     /// slider seeds its marker here. The label is the slider stop (so `max` stays
     /// "max" in the UI even though it forwarded `xhigh` to the backend).
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Whether tool chips are all folded (Ctrl+O toggle).
+    /// Whether tool chips are all folded (Ctrl+Shift+O / `/fold` toggle).
     pub fold_all: bool,
+    /// Per-node fold OVERRIDES (Fix E / Q8), keyed by [`NodeId`]. Absent ⇒ the
+    /// default policy (a completed turn folds, the last stays open; a tool result is
+    /// truncated). An entry wins: `Turn{..}=>true/false` folds/expands that turn;
+    /// `Tool{..}=>true` expands that tool's result. A left-click on a node's
+    /// triangle/bullet column toggles its entry ([`AppState::toggle_fold`]); the
+    /// global `fold_all` flip clears this map so "fold all" / "unfold all" is a clean
+    /// reset. Sparse — only toggled nodes appear.
+    pub folds: std::collections::HashMap<NodeId, bool>,
     /// The highlighted row in the `/`-slash command palette dropdown (↑/↓ move it;
     /// Tab/Enter completes the highlighted one). Reset to 0 whenever the typed
     /// partial changes; clamped to the live match count by the renderer + nav.
@@ -390,6 +93,11 @@ pub struct AppState {
     pub busy: bool,
     /// Monotonic ms when the current turn began (for the heat ramp).
     pub turn_started_ms: u64,
+    /// Wall-time (ms) the LAST finished turn took, stamped in `MessageEnd` before
+    /// `busy=false` and CLEARED on the next `MessageBegin`. Drives the frozen
+    /// above-composer done-line (`⠿ … for <fmt_dur> · ↑in · ↓out`, Q7) — shown only
+    /// while idle right after a turn. `None` before the first turn finishes.
+    pub last_turn_ms: Option<u64>,
     /// The working directory shown in the header.
     pub cwd: String,
     /// The GA repo root (for `@path` expansion + `!cmd` cwd + history file).
@@ -463,17 +171,33 @@ pub struct AppState {
     /// a dashboard left-click `(col, row)` back to a row index. Set each frame.
     last_term_size: (u16, u16),
     /// Monotonic block-id source (never reused → stable scroll anchors, P1).
-    next_block_id: u64,
+    pub(in crate::app) next_block_id: u64,
     /// The wrap cache keyed at the current transcript width (P1). Rebuilt per
     /// frame via `sync`; only changed blocks reflow. Owned here so the transcript
     /// widget and copy actions share one derivation.
     pub wrap_cache: WrapCache,
     /// The scrolling viewport over the transcript (logical [`ScrollAnchor`], P1).
     pub viewport: Viewport,
+    /// The clickable-node hit table (Fix E / Q8), rebuilt every `sync_transcript`:
+    /// each entry maps a contiguous GLOBAL visual-row range to the fold node that
+    /// occupies it (a turn's `▸` header, or a tool bullet). A left-mouse-down on the
+    /// triangle/bullet column of a row in one of these ranges resolves the node
+    /// ([`AppState::transcript_node_at`]) and toggles its fold. Width-keyed implicitly
+    /// (derived from the just-synced cache), so it is always consistent with the rows
+    /// the transcript draws this frame.
+    node_hit: Vec<(std::ops::RangeInclusive<usize>, NodeId)>,
     /// The transcript width the cache was last synced at (to detect resize).
-    last_width: u16,
-    /// The fold-all state the cache was last synced at (to detect a Ctrl+O flip).
-    last_fold_all: bool,
+    pub(in crate::app) last_width: u16,
+    /// The fold-all state the cache was last synced at (to detect a `/fold` flip).
+    pub(in crate::app) last_fold_all: bool,
+    /// A monotonic FOLD epoch, bumped whenever the fold STATE changes without a
+    /// block `rev` change (a per-node toggle, or a `fold_all` flip that also clears
+    /// overrides). `sync_transcript` rebuilds the wrap cache when it advances past
+    /// `last_fold_epoch` — the `(block_id, rev)` reuse cannot otherwise see that a
+    /// block's projected rows changed (the fold projection is not in `rev`). (Fix E.)
+    pub(in crate::app) fold_epoch: u64,
+    /// The fold epoch the wrap cache was last synced at.
+    pub(in crate::app) last_fold_epoch: u64,
     /// The animated effects engine (§9). OFF by default; advanced once per 0.1s `tick()`
     /// by a FIXED dt so it is driven by the deterministic tick counter, not a wall clock.
     /// Under `--smoke` the engine is never ticked → no animation.
@@ -483,6 +207,20 @@ pub struct AppState {
     /// with an injected `now_ms` (never a wall-clock), so the transitions stay
     /// headlessly testable. `Default` = neither chord is mid-sequence.
     pub chord: ChordState,
+    /// The UI→app INTENT queue (ARCH Fix A). Key/command/apply handlers push
+    /// [`AppEvent`]s here via [`AppState::emit`] instead of closing over the bridge
+    /// `Sender`; the event loop drains it each iteration ([`AppState::drain_actions`])
+    /// and performs each intent in ONE place. Always empty between iterations.
+    actions: Vec<AppEvent>,
+    /// Memoized snapshot of the `@`-picker project-file walk (Q12 @ speed). The
+    /// walk descends every non-ignored dir of the (giant) repo and was previously
+    /// run 3× per frame while an `@query` was live, reading as the `@`/Ctrl+S
+    /// freeze. We cache `(walked_at, files)` and re-walk at most once per
+    /// [`FILE_INDEX_TTL`]; otherwise the call sites get a cheap `Arc` clone. Async
+    /// is banned here, so this is the synchronous-equivalent of Codex's
+    /// `FileSearchManager` (walk once, hand out a shared snapshot). `RefCell` so the
+    /// memoization works behind the `&self` render-plane borrow.
+    file_index: std::cell::RefCell<Option<(std::time::Instant, std::sync::Arc<Vec<String>>)>>,
 }
 
 impl Default for AppState {
@@ -498,11 +236,16 @@ impl Default for AppState {
             pet_style: PetStyle::default(),
             reasoning_effort: None,
             fold_all: false,
+            folds: std::collections::HashMap::new(),
             palette_sel: 0,
-            mouse_capture: true,
+            // Mouse capture starts OFF so the terminal owns native drag-select for
+            // inline copy (Q2 / F7); `Ctrl+Shift+M` opts INTO wheel-scroll capture.
+            // This is the single source of truth — `term::setup` no longer captures.
+            mouse_capture: false,
             lang: Lang::default(),
             busy: false,
             turn_started_ms: 0,
+            last_turn_ms: None,
             cwd: cwd.display().to_string(),
             repo_root: cwd.clone(),
             pending_ask: None,
@@ -517,7 +260,7 @@ impl Default for AppState {
             last_tab_status: None,
             last_title: String::new(),
             view: View::default(),
-            theme: Theme::ga_default(),
+            theme: Theme::default_theme(),
             sessions: SessionMap::new(cwd.clone(), crate::bridge::BridgeOptions::default()),
             rename: None,
             overlay: None,
@@ -531,10 +274,15 @@ impl Default for AppState {
             next_block_id: 1,
             wrap_cache: WrapCache::new(80),
             viewport: Viewport::new(1),
+            node_hit: Vec::new(),
             last_width: 0,
             last_fold_all: false,
+            fold_epoch: 0,
+            last_fold_epoch: 0,
             effects: EffectsEngine::from_env(),
             chord: ChordState::default(),
+            actions: Vec::new(),
+            file_index: std::cell::RefCell::new(None),
         }
     }
 }
@@ -542,6 +290,19 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         AppState::default()
+    }
+
+    /// Queue a UI→app intent (ARCH Fix A). Handlers call this instead of
+    /// performing the bridge/view effect inline; the event loop drains the queue
+    /// each iteration via [`AppState::drain_actions`] and performs each one.
+    pub fn emit(&mut self, ev: AppEvent) {
+        self.actions.push(ev);
+    }
+
+    /// Take the queued intents, leaving the queue empty. The event loop performs
+    /// each drained [`AppEvent`] in the ONE place the bridge transport lives.
+    pub fn drain_actions(&mut self) -> Vec<AppEvent> {
+        std::mem::take(&mut self.actions)
     }
 
     /// Advance the 0.1s tick (spinner / gerund clock) AND advance the effects engine by a
@@ -603,7 +364,9 @@ impl AppState {
     }
 
     /// Allocate the next stable block id (monotonic, never reused).
-    fn alloc_block_id(&mut self) -> u64 {
+    /// `pub(in crate::app)` so the [`reducer`](crate::app::reducer) fold can mint
+    /// ids when it appends streamed blocks.
+    pub(in crate::app) fn alloc_block_id(&mut self) -> u64 {
         let id = self.next_block_id;
         self.next_block_id = self.next_block_id.wrapping_add(1);
         id
@@ -659,355 +422,14 @@ impl AppState {
         }
     }
 
-    /// The OSC0 terminal title for the current state: `<spinner> GenericAgent ·
-    /// <model>` while busy, else `GenericAgent · <model>`.
+    /// The OSC0 terminal title — Q9: it leads with the BEAR kaomoji `ʕ•ᴥ•ʔ` in
+    /// BOTH states (the tab "defaults to bear"). The bear is the constant tab
+    /// identity; busy vs idle is conveyed by the OSC tab-STATUS channel
+    /// (`tab_status`), not by swapping the title's leading glyph.
     pub fn terminal_title(&self) -> String {
         let model = self.model.as_deref().unwrap_or("");
-        if self.busy {
-            let glyph = self.spinner_style.glyph(self.spinner_tick);
-            format!("{glyph} GenericAgent · {model}")
-        } else {
-            format!("GenericAgent · {model}")
-        }
-    }
-
-    /// Fold one bridge event into the state. PURE w.r.t. I/O (only mutates self;
-    /// `now_ms` injected). This is the core reducer — unit-tested below.
-    ///
-    /// TRANSCRIPT HYGIENE (redesign_cc.md §1/§c): the bridge's STDERR / parse-noise
-    /// is NEVER rendered as a transcript row. GA's failover diagnostics
-    /// (`[MixinSession] …retry N/M` on stderr, llmcore.py:988) and core `print()`
-    /// chatter are routed to a DEBUG-ONLY log ([`Self::push_bridge_debug`]), not the
-    /// chat. A FATAL `SpawnFailed` / `ChildExited` becomes a CONNECTION STATUS (the
-    /// footer's connection chip shows it — N1 "never a silent disconnect"), not a
-    /// transcript notice that would scroll away with the conversation.
-    pub fn apply_bridge_event(&mut self, ev: BridgeEvent, now_ms: u64) {
-        match ev {
-            BridgeEvent::Frame(frame) => self.apply_frame(frame, now_ms),
-            BridgeEvent::SpawnFailed { detail } => {
-                // Fatal: surface as the connection status only (footer chip), not a
-                // transcript row. The status word is derived from `conn`.
-                self.conn = ConnStatus::Disconnected {
-                    reason: detail.clone(),
-                };
-                self.busy = false;
-                self.push_bridge_debug(format!("spawn failed: {detail}"));
-                // A failure → the ~0.15s lightning flash (a no-op unless effects are on).
-                self.effects.flash_lightning();
-            }
-            BridgeEvent::ParseNoise { line } => {
-                // An unparsed bridge line is DIAGNOSTIC noise — route to the debug
-                // log, never the transcript (§c suppress bridge stderr/noise rows).
-                self.push_bridge_debug(format!("[unparsed] {line}"));
-            }
-            BridgeEvent::ChildExited { code } => {
-                let reason = match code {
-                    Some(c) => format!("bridge exited (code {c})"),
-                    None => "bridge exited".to_string(),
-                };
-                // Fatal: connection status only (footer chip), not a transcript row.
-                self.conn = ConnStatus::Disconnected {
-                    reason: reason.clone(),
-                };
-                self.busy = false;
-                self.push_bridge_debug(reason);
-                // A failure → the lightning flash (no-op unless effects are on).
-                self.effects.flash_lightning();
-            }
-            BridgeEvent::Stderr { line } => {
-                // ga_bridge.py routes core print()/tracebacks + failover retry
-                // diagnostics (`[MixinSession] …retry N/M`) here. SUPPRESS them from
-                // the transcript entirely — they go to the debug-only log (§c). The
-                // disconnect path above already surfaces FATAL failures via `conn`.
-                self.push_bridge_debug(line);
-            }
-        }
-    }
-
-    /// Fold one parsed `CoreToUi` frame.
-    fn apply_frame(&mut self, frame: CoreToUi, now_ms: u64) {
-        match frame {
-            CoreToUi::Ready { model, .. } => {
-                self.model = model.clone();
-                self.conn = ConnStatus::Connected { model };
-            }
-            CoreToUi::MessageBegin { mid, role } => {
-                self.busy = true;
-                self.turn_started_ms = now_ms;
-                let id = self.alloc_block_id();
-                self.transcript.push(Block::new(
-                    id,
-                    Some(mid),
-                    Role::from_proto(&role),
-                    String::new(),
-                    false,
-                ));
-            }
-            CoreToUi::MessageDelta { mid, text } => {
-                if let Some(block) = self.block_for_mid_mut(&mid) {
-                    block.source.push_str(&text);
-                    // Bump rev so the wrap cache reflows ONLY this block (P1).
-                    block.rev = block.rev.wrapping_add(1);
-                } else {
-                    // A delta with no begin — create a block so text isn't lost.
-                    let id = self.alloc_block_id();
-                    self.transcript.push(Block::new(
-                        id,
-                        Some(mid),
-                        Role::Assistant,
-                        text,
-                        false,
-                    ));
-                    self.busy = true;
-                }
-            }
-            CoreToUi::MessageEnd { mid, .. } => {
-                let mut finalized_source: Option<String> = None;
-                if let Some(block) = self.block_for_mid_mut(&mid)
-                    && !block.finalized
-                {
-                    block.finalized = true;
-                    block.rev = block.rev.wrapping_add(1);
-                    if block.role == Role::Assistant {
-                        finalized_source = Some(block.source.clone());
-                    }
-                }
-                // Harvest any tool calls in the just-finalized assistant message
-                // into the `/verbose` audit trail (split-borrow: read the source,
-                // then push). Each chip becomes one audit line.
-                if let Some(src) = finalized_source {
-                    for tc in crate::render::chip::parse_tool_calls(&src) {
-                        let (badge, _) = tc.status.badge();
-                        let args = if tc.args.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  {}", tc.args)
-                        };
-                        self.push_tool_audit(format!("{} {}{}", badge, tc.name, args));
-                    }
-                }
-                // The turn is done once its message ends (single-turn model).
-                self.busy = false;
-                // A successful turn completion → the sparkle burst (no-op unless on).
-                self.effects.burst_sparkle();
-            }
-            CoreToUi::AskUser {
-                ask_id,
-                question,
-                options,
-                free_text,
-            } => {
-                let preview = format!("? {question}");
-                let ask = PendingAsk { ask_id, question, options, free_text };
-                self.push_notice(preview);
-                self.busy = false;
-                if self.pending_ask.is_some() {
-                    // A parallel ask arrived while one is being answered → QUEUE it
-                    // so it surfaces after the current one (§7 queued asks).
-                    self.ask_queue.push_back(ask);
-                } else {
-                    self.pending_ask = Some(ask);
-                    // Surface the unified ask_user CARD automatically (§7) — but
-                    // never clobber an overlay the user already has open.
-                    if self.overlay.is_none() {
-                        self.open_ask_user();
-                    }
-                }
-            }
-            CoreToUi::Status {
-                model,
-                context_percent,
-                tokens,
-                input_tokens,
-                output_tokens,
-                cache_tokens,
-                last_input,
-                last_output,
-                ..
-            } => {
-                if let Some(m) = model {
-                    self.model = Some(m.clone());
-                    if let ConnStatus::Connected { model: cm } = &mut self.conn {
-                        *cm = Some(m);
-                    }
-                }
-                if let Some(p) = context_percent {
-                    self.context_percent = Some(p);
-                    self.cost.context_percent = Some(p);
-                }
-                if let Some(tk) = tokens {
-                    self.tokens = Some(tk);
-                }
-                // Cumulative split totals are AUTHORITATIVE when the bridge sends
-                // them (it sums cost_tracker.all_trackers()), so SET them rather
-                // than the old `max`-guess. `cache_tokens` is the cache-read hits.
-                if let Some(i) = input_tokens {
-                    self.cost.input = i;
-                }
-                if let Some(o) = output_tokens {
-                    self.cost.output = o;
-                }
-                if let Some(c) = cache_tokens {
-                    self.cost.cache = c;
-                }
-                // Per-call snapshots drive the spinner's `↑in ↓out` live readout.
-                if last_input.is_some() {
-                    self.tok_in = last_input;
-                }
-                if last_output.is_some() {
-                    self.tok_out = last_output;
-                }
-                // Legacy bridge (tokens only, no split) → keep a sane /cost total
-                // by folding the running count into output; the new bridge sends
-                // the split above so this branch never fires for it.
-                if input_tokens.is_none() && output_tokens.is_none() {
-                    if let Some(tk) = tokens {
-                        self.cost.output = self.cost.output.max(tk);
-                    }
-                }
-                // No price table exists in GA → leave cost_usd at 0.0; the /cost
-                // card shows real tokens and renders cost as a placeholder dash.
-            }
-            CoreToUi::Pong { .. } => { /* liveness — no state change */ }
-            CoreToUi::LlmList { items } => self.apply_llm_list(items),
-            CoreToUi::BtwAnswer { ask_id, text, error } => self.apply_btw_answer(ask_id, text, error),
-            CoreToUi::RewindResult { dropped, remaining } => {
-                // A NON-history acknowledgment: surface as a notice (the rewind
-                // itself already truncated the local display when the user picked).
-                self.push_notice(format!(
-                    "{} {} {} · {} {}",
-                    crate::i18n::t(self.lang, "rewind.done"),
-                    dropped,
-                    crate::i18n::t(self.lang, "rewind.turns_suffix"),
-                    remaining,
-                    crate::i18n::t(self.lang, "status.total"),
-                ));
-            }
-            CoreToUi::Error {
-                message,
-                fatal,
-                ..
-            } => {
-                self.push_notice(format!("error: {message}"));
-                if fatal {
-                    self.conn = ConnStatus::Disconnected {
-                        reason: message,
-                    };
-                    self.busy = false;
-                }
-            }
-        }
-    }
-
-    /// Find the (in-flight) block for a given mid, newest first.
-    fn block_for_mid_mut(&mut self, mid: &str) -> Option<&mut Block> {
-        self.transcript
-            .iter_mut()
-            .rev()
-            .find(|b| b.mid.as_deref() == Some(mid))
-    }
-
-    // ---- overlay stack (§3 / §7: pickers, ask-user, help, cost, verbose) -----
-
-    /// Fold an incoming `LlmList` frame (N3): if a `/llm` picker overlay is already
-    /// open and waiting for the model list, REPLACE its items in place (so the
-    /// `querying…` placeholder becomes the live rows); otherwise open a fresh
-    /// `/llm` picker. The selection seeds on the current model. PURE-ish.
-    pub fn apply_llm_list(&mut self, items: Vec<LlmItem>) {
-        let pick_items = llm_items_to_picks(&items);
-        match &mut self.overlay {
-            Some(Overlay::Picker { picker, .. }) if picker.kind == PickerKind::Llm => {
-                let sel = pick_items.iter().position(|i| i.current).unwrap_or(0);
-                picker.items = pick_items;
-                picker.sel = sel;
-            }
-            _ => {
-                self.overlay = Some(Overlay::Picker {
-                    picker: Picker::new(PickerKind::Llm, pick_items),
-                    theme_backup: None,
-                });
-            }
-        }
-    }
-
-    /// Open a reusable list picker overlay (`/theme` `/emoji` `/language`
-    /// `/export` `/rewind` `/continue` `/scheduler`). `theme_backup` is the theme
-    /// to restore on `Esc` for a live-preview picker (else `None`).
-    pub fn open_picker(&mut self, picker: Picker, theme_backup: Option<Theme>) {
-        self.overlay = Some(Overlay::Picker { picker, theme_backup });
-    }
-
-    /// Fold an incoming `BtwAnswer` frame into the `/btw` card (§7): set the card's
-    /// answer text (or an error) IFF the card is still open AND its `ask_id` matches
-    /// (so a stale card can't show a newer side-question's answer). The answer is
-    /// shown in the EPHEMERAL card only — it is NEVER pushed to the transcript, so a
-    /// side question never pollutes the conversation history. If no matching card is
-    /// open (the user dismissed it with Esc), the answer is silently dropped — which
-    /// is exactly the "Esc dismisses, no history pollution" contract. PURE-ish.
-    pub fn apply_btw_answer(&mut self, ask_id: String, text: Option<String>, error: Option<String>) {
-        if let Some(Overlay::Btw { ask_id: open_id, answer, .. }) = self.overlay.as_mut() {
-            if *open_id == ask_id {
-                let body = match (text, error) {
-                    (Some(t), _) => t,
-                    (None, Some(e)) => format!("{}: {e}", crate::i18n::t(self.lang, "btw.failed")),
-                    (None, None) => crate::i18n::tf(self.lang, "btw.failed"),
-                };
-                *answer = Some(body);
-            }
-        }
-        // No open Btw card (dismissed) → drop the answer (no history pollution).
-    }
-
-    /// Open the unified ask_user card overlay from a pending ask (§7). Consumes the
-    /// `pending_ask` so the cockpit shows the card, not the raw notice.
-    pub fn open_ask_user(&mut self) {
-        if let Some(ask) = self.pending_ask.clone() {
-            let candidates: Vec<String> = ask.options.iter().map(|o| o.label.clone()).collect();
-            self.overlay = Some(Overlay::AskUser(AskUserPicker::new(
-                ask.ask_id,
-                ask.question,
-                candidates,
-                ask.free_text,
-            )));
-        }
-    }
-
-    /// After the current ask is answered/dismissed, surface the NEXT queued ask (if
-    /// any) — opening its card. The caller clears `pending_ask` first; this pops
-    /// the queue into it and opens the overlay. Returns `true` if one was surfaced.
-    /// This is what makes "queued parallel asks surface in turn" (§7) work.
-    pub fn surface_next_ask(&mut self) -> bool {
-        if self.pending_ask.is_some() {
-            return false; // one is still active.
-        }
-        if let Some(next) = self.ask_queue.pop_front() {
-            self.pending_ask = Some(next);
-            if self.overlay.is_none() {
-                self.open_ask_user();
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Open a simple info overlay (help / status / cost / verbose / btw).
-    pub fn open_overlay(&mut self, overlay: Overlay) {
-        self.overlay = Some(overlay);
-    }
-
-    /// Close any open overlay (the universal `Esc` for modals). Returns `true` if
-    /// one was open (so the key handler knows the Esc was consumed by a modal).
-    pub fn close_overlay(&mut self) -> bool {
-        self.overlay.take().is_some()
-    }
-
-    /// True while ANY overlay is up. (The key router now branches on
-    /// [`Overlay::is_modal`] so a non-modal `/btw` toast doesn't steal input; this
-    /// stays as the simple "is something open" query for callers/tests.)
-    #[allow(dead_code)]
-    pub fn has_overlay(&self) -> bool {
-        self.overlay.is_some()
+        let bear = crate::flavor::PETS_BEAR[0][0]; // "ʕ•ᴥ•ʔ"
+        format!("{bear} GenericAgent · {model}")
     }
 
     /// Append a tool-call line to the `/verbose` audit trail (called when a tool
@@ -1050,20 +472,35 @@ impl AppState {
         let width = width.max(1);
         let fold_all = self.fold_all;
         // The assistant chip boxes are sized to the transcript width, so they are
-        // a function of width — fold to the transcript's inner width here.
+        // a function of width — fold to the transcript's inner width here. Each block
+        // sees the per-node fold overrides through a `BlockFolds` keyed on its id.
         let render_blocks: Vec<RenderBlock> = self
             .transcript
             .iter()
-            .map(|b| b.to_render_block(theme, fold_all, width))
+            .map(|b| {
+                let folds = BlockFolds { block_id: b.id, fold_all, overrides: Some(&self.folds) };
+                b.to_render_block(theme, &folds, width)
+            })
             .collect();
 
-        // A width OR fold-state change invalidates the whole cache (both alter the
-        // projected rows). Width also re-derives the viewport from the anchor (P1).
-        if width != self.last_width || fold_all != self.last_fold_all {
+        // A width / fold-all / per-node-fold change invalidates the whole cache (all
+        // alter the projected rows). Width also re-derives the viewport from the
+        // anchor (P1). A per-node fold toggle bumps `fold_epoch` WITHOUT bumping any
+        // block `rev`, so the `(id, rev)` reuse can't see the projection changed — we
+        // must drop the per-block memo so every block reflows from the new projection.
+        let fold_changed = fold_all != self.last_fold_all || self.fold_epoch != self.last_fold_epoch;
+        if width != self.last_width || fold_changed {
+            if width == self.wrap_cache.width() && fold_changed {
+                // Same width, only the fold projection changed: clear the per-block
+                // memo so `rewidth` (a no-op clearer at an unchanged width) can't keep
+                // stale rows; then the rebuild below reflows everything fresh.
+                self.wrap_cache.invalidate_all();
+            }
             self.wrap_cache.rewidth(width, &render_blocks);
             self.viewport.resize(height, &self.wrap_cache);
             self.last_width = width;
             self.last_fold_all = fold_all;
+            self.last_fold_epoch = self.fold_epoch;
         } else {
             // Same width + fold: reflow only changed blocks (streaming → O(1)).
             self.wrap_cache.sync(&render_blocks);
@@ -1071,7 +508,24 @@ impl AppState {
                 self.viewport.resize(height, &self.wrap_cache);
             }
         }
+        self.rebuild_node_hit(theme, fold_all, width);
         render_blocks
+    }
+
+    /// Apply the per-frame STATE WRITES that render used to do mid-draw, hoisted out
+    /// so [`crate::components::cockpit::render`] is pure (`y = f(x)`, P11 / F7). The
+    /// event loop calls this with the terminal `area` BEFORE `terminal.draw`:
+    ///   * record the full terminal size (dashboard click-mapping geometry);
+    ///   * in the COCKPIT view ONLY, sync the wrap cache + viewport to the transcript
+    ///     region — derived from the SAME layout split render draws into (so geometry
+    ///     never drifts), matching the previous in-render behavior exactly (the
+    ///     dashboard/workflows views never synced the transcript).
+    pub fn prepare_frame(&mut self, area: ratatui::layout::Rect, theme: &Theme) {
+        self.set_term_size(area.width, area.height);
+        if self.view == View::Cockpit {
+            let transcript = crate::components::cockpit::split_cockpit(self, area).transcript;
+            self.sync_transcript(transcript.width, transcript.height as usize, theme);
+        }
     }
 
     /// Scroll the transcript by `delta` visual rows (+down / -up). Mouse wheel is
@@ -1184,206 +638,24 @@ impl AppState {
     }
 
     /// The candidate project files for the composer's `@` picker (gitignore-aware,
-    /// bounded). Walks the repo root; degrades to empty on error.
-    pub fn list_project_files(&self) -> Vec<String> {
-        crate::input::paths::list_project_files(&self.repo_root)
-    }
-
-    // ---- multi-session glue (§6 / N2) ---------------------------------------
-    //
-    // The ACTIVE session's live state lives in the `AppState` fields above
-    // (transcript/conn/model/busy/pending_ask/…) — that is what the cockpit
-    // renders and what the existing reducer + 130+ tests exercise unchanged. The
-    // `SessionMap` is the source of truth for the OTHER sessions. Two operations
-    // keep them coherent: `snapshot_active_into_map` (push the live active state
-    // into its `Session` record, e.g. before drawing the dashboard or switching)
-    // and the swap inside `switch_session` (pull a target session's stored state
-    // into the live fields). This localizes the multi-session bookkeeping to a few
-    // methods instead of threading a session id through the whole render plane.
-
-    /// Mirror the live ACTIVE-session fields into its [`Session`] record so the
-    /// dashboard reads an up-to-date snapshot (transcript for preview/category,
-    /// busy/pending for the status). Cheap clone of the transcript (the dashboard
-    /// only needs the tail line; but a clone keeps the record self-contained and
-    /// the call sites are rare — a frame arrival or a view switch, not per frame).
-    pub fn snapshot_active_into_map(&mut self) {
-        let active_id = self.sessions.active;
-        // Read the live fields, then write them into the record (split borrows).
-        let transcript = self.transcript.clone();
-        let conn = self.conn.clone();
-        let model = self.model.clone();
-        let busy = self.busy;
-        let busy_since = self.turn_started_ms;
-        let pending = self.pending_ask.clone();
-        let had_reply = self
-            .transcript
-            .iter()
-            .any(|b| b.role == Role::Assistant && !b.source.is_empty());
-        if let Some(s) = self.sessions.session_mut(active_id) {
-            s.transcript = transcript;
-            s.conn = conn;
-            s.model = model;
-            s.busy = busy;
-            s.busy_since_ms = busy_since;
-            s.pending_ask = pending;
-            s.had_reply = s.had_reply || had_reply;
+    /// bounded). Walks the repo root once per [`FILE_INDEX_TTL`] and returns a cheap
+    /// `Arc` clone of the cached snapshot on every other call — so the three live
+    /// call sites (dropdown layout + paint + the `@` keystroke handler) share ONE
+    /// walk per frame instead of three (Q12 @ speed / Ctrl+S no-freeze). A walk
+    /// degrades to empty on error inside `paths::list_project_files`. PURE w.r.t.
+    /// the public state (the `RefCell` cache is interior mutability for the `&self`
+    /// render-plane borrow); the returned `Arc<Vec<String>>` derefs to `&[String]`
+    /// at the call sites, so they keep calling `app.list_project_files()` unchanged.
+    pub fn list_project_files(&self) -> std::sync::Arc<Vec<String>> {
+        let mut slot = self.file_index.borrow_mut();
+        if let Some((walked_at, files)) = slot.as_ref() {
+            if walked_at.elapsed() < FILE_INDEX_TTL {
+                return std::sync::Arc::clone(files);
+            }
         }
-    }
-
-    /// Load a [`Session`]'s stored state into the live ACTIVE-session fields and
-    /// reset the render plane (wrap cache + viewport) so the cockpit re-derives
-    /// from the incoming transcript at the next frame (P1). The composer buffer is
-    /// the caller's concern (the per-session input stash is handled by
-    /// [`SessionMap::switch`], which returns the incoming draft).
-    fn load_active_fields_from(&mut self, id: u64) {
-        let Some(s) = self.sessions.session(id) else {
-            return;
-        };
-        self.transcript = s.transcript.clone();
-        self.conn = s.conn.clone();
-        self.model = s.model.clone();
-        self.busy = s.busy;
-        self.turn_started_ms = s.busy_since_ms;
-        self.pending_ask = s.pending_ask.clone();
-        // Re-id the live next_block_id past the loaded transcript so new live
-        // appends don't collide with the session's own ids.
-        self.next_block_id = self
-            .transcript
-            .iter()
-            .map(|b| b.id)
-            .max()
-            .map(|m| m.wrapping_add(1))
-            .unwrap_or(1);
-        // Reset the render plane so the next `sync_transcript` re-derives cleanly.
-        self.wrap_cache = WrapCache::new(self.last_width.max(1));
-        self.viewport = Viewport::new(1);
-        self.last_width = 0; // force a full rewidth on the next frame.
-        self.last_fold_all = self.fold_all;
-    }
-
-    /// Switch the active session to `id`: snapshot the current active state into
-    /// its record, stash the composer draft on it, load the target's state +
-    /// restore its stashed draft, and return to the cockpit view. PURE-ish (only
-    /// touches in-memory state + the composer).
-    pub fn switch_session(&mut self, id: u64) {
-        if id == self.sessions.active && self.view == View::Cockpit {
-            return;
-        }
-        self.snapshot_active_into_map();
-        let current_draft = self.composer.text().to_string();
-        let incoming_draft = self.sessions.switch(id, current_draft);
-        self.load_active_fields_from(self.sessions.active);
-        // Restore the incoming session's stashed composer draft.
-        self.composer.set_buffer(incoming_draft.clone(), incoming_draft.len());
-        self.view = View::Cockpit;
-    }
-
-    /// Public wrapper over [`Self::load_active_fields_from`] for the cockpit's
-    /// session-cycle path (Ctrl+Up/Down): the map's active already moved; pull its
-    /// stored state into the live fields (the composer draft is set by the caller).
-    pub fn load_active_fields_from_public(&mut self, id: u64) {
-        self.load_active_fields_from(id);
-        self.view = View::Cockpit;
-    }
-
-    /// Load the fallback active session after a drop (Ctrl+W/Ctrl+D): pull its
-    /// stored state in and restore its stashed draft. Handles the last-session
-    /// reset (a blank session) cleanly.
-    pub fn load_active_fields_after_drop(&mut self, id: u64) {
-        self.load_active_fields_from(id);
-        let draft = self
-            .sessions
-            .session_mut(id)
-            .map(|s| std::mem::take(&mut s.input_stash))
-            .unwrap_or_default();
-        self.composer.set_buffer(draft.clone(), draft.len());
-        self.view = View::Cockpit;
-    }
-
-    /// After a structural change that already moved `self.sessions.active` (a
-    /// `new_session` or `branch`), load the NEW active session's state into the
-    /// live fields and reset the composer to its (empty / forked) draft. The
-    /// LEAVING session's live state must already be snapshotted (the caller does
-    /// `snapshot_active_into_map()` first). Returns to the cockpit view.
-    pub fn load_active_session_after_structural_change(&mut self, new_active: u64) {
-        // The map's active is `new_active`; pull its stored state in.
-        debug_assert_eq!(self.sessions.active, new_active);
-        self.load_active_fields_from(new_active);
-        let draft = self
-            .sessions
-            .session_mut(new_active)
-            .map(|s| std::mem::take(&mut s.input_stash))
-            .unwrap_or_default();
-        self.composer.set_buffer(draft.clone(), draft.len());
-        self.view = View::Cockpit;
-    }
-
-    /// Open the full-screen session dashboard (Ctrl+S / left-click sessions area).
-    /// Snapshots the active session so the dashboard preview/category are current,
-    /// then seeds the dashboard selection on the active session's row.
-    pub fn open_dashboard(&mut self) {
-        self.snapshot_active_into_map();
-        self.view = View::Dashboard;
-        self.rename = None;
-        // Seed the selection on the active session's row (so Enter re-opens it).
-        let rows = self.sessions.dashboard_rows();
-        let active = self.sessions.active;
-        if let Some(idx) = rows.iter().position(|r| {
-            matches!(r, crate::app::session::DashRow::Session { id, .. } if *id == active)
-        }) {
-            self.sessions.dash_sel = idx;
-        }
-    }
-
-    /// Close the dashboard, returning to the cockpit (Esc).
-    pub fn close_dashboard(&mut self) {
-        self.view = View::Cockpit;
-        self.rename = None;
-    }
-
-    // ---- the /workflows panel (§7) ------------------------------------------
-
-    /// Open the full-screen `/workflows` panel (reached via `/workflows`
-    /// `/conductor` `/hive` `/goal`). Lazily STARTS the singleton watcher on first
-    /// open (its own poll thread; `repo_root` tells it where `temp/` lives), then
-    /// ACTIVATES it so it begins polling (it parks again on close → zero idle
-    /// traffic). The panel renders the latest snapshot the event loop feeds in.
-    pub fn open_workflows(&mut self) {
-        if self.workflow_watcher.is_none() {
-            let (watcher, _change_rx) = crate::workflow::WorkflowWatcher::start(self.repo_root.clone());
-            // The change receiver is dropped: the event loop already redraws on its
-            // 100ms tick + bridge events, and the panel reads `snapshot()` each
-            // frame, so we don't need the extra wake channel here (keeping the watcher
-            // self-contained avoids threading another receiver through the loop).
-            self.workflow_watcher = Some(watcher);
-        }
-        if let Some(w) = &self.workflow_watcher {
-            w.set_active(true);
-        }
-        self.view = View::Workflows;
-        // Pull an initial snapshot immediately so the panel isn't blank for a tick.
-        self.refresh_workflow_snapshot();
-    }
-
-    /// Close the `/workflows` panel, returning to the cockpit (Esc). PARKS the
-    /// watcher so it stops generating background traffic while nobody is looking
-    /// (the §5.3 idle back-off, achieved by pausing rather than slow-polling).
-    pub fn close_workflows(&mut self) {
-        if let Some(w) = &self.workflow_watcher {
-            w.set_active(false);
-        }
-        self.view = View::Cockpit;
-    }
-
-    /// Refresh the panel's snapshot from the watcher (called each frame while the
-    /// panel is open). Re-clamps the panel focus when the watcher's generation
-    /// advanced (nodes may have appeared/vanished). Cheap: a short-held lock + a
-    /// clone of a small snapshot; never blocks (the watcher does the I/O off-thread).
-    pub fn refresh_workflow_snapshot(&mut self) {
-        if let Some(w) = &self.workflow_watcher {
-            self.workflow_snapshot = w.snapshot();
-            self.workflow_panel.clamp_focus(&self.workflow_snapshot);
-        }
+        let files = std::sync::Arc::new(crate::input::paths::list_project_files(&self.repo_root));
+        *slot = Some((std::time::Instant::now(), std::sync::Arc::clone(&files)));
+        files
     }
 
     /// Switch the interface language and trigger a FULL repaint (§9 "/language
@@ -1409,40 +681,8 @@ impl AppState {
         self.last_width = 0;
     }
 
-    /// Apply a TAGGED bridge event `(session_id, ev)` from the multiplexer. If the
-    /// event is for the ACTIVE session we fold it through the normal live reducer
-    /// (so the cockpit + footer update exactly as in single-session); otherwise we
-    /// fold it into that session's own record (so its dashboard preview/category
-    /// update live without disturbing the active session). `now_ms` injected.
-    pub fn apply_tagged_event(&mut self, session_id: u64, ev: BridgeEvent, now_ms: u64) {
-        if session_id == self.sessions.active {
-            // Active session → the live reducer (cockpit path). Mirror the result
-            // back into the record so a later dashboard open is consistent.
-            self.apply_bridge_event(ev, now_ms);
-            self.snapshot_active_into_map();
-        } else if let Some(s) = self.sessions.session_mut(session_id) {
-            match ev {
-                BridgeEvent::Frame(frame) => s.apply_frame(frame, now_ms),
-                other => s.apply_lifecycle(&other),
-            }
-        }
-        // A frame for an unknown (already-dropped) session is discarded.
-    }
 }
 
-/// Map `LlmList` items `(idx, name, current)` onto picker rows: the row label is
-/// `"i. name"` (the picker widget prepends `●` for the current one — §4 "rows
-/// `● i. name`"), the `id` is the 0-based LLM index (`SwitchLlm` is `id+1`), and
-/// `current` carries the active marker. PURE — the `/llm` picker mapping. The
-/// `llm_picker_maps_index` deliverable pins the index round-trip on the picker.
-pub fn llm_items_to_picks(items: &[LlmItem]) -> Vec<PickItem> {
-    items
-        .iter()
-        .map(|it| {
-            PickItem::new(it.idx as usize, format!("{}. {}", it.idx, it.name)).current(it.current)
-        })
-        .collect()
-}
 
 /// Discover the current git branch under `root` by reading `.git/HEAD` (no
 /// `git` subprocess — fast + dependency-free). Returns the short branch name, or
@@ -1464,615 +704,4 @@ pub fn discover_git_branch(root: &std::path::Path) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bridge::protocol::CoreToUi;
-
-    fn frame(f: CoreToUi) -> BridgeEvent {
-        BridgeEvent::Frame(f)
-    }
-
-    #[test]
-    fn ready_marks_connected_with_model() {
-        let mut app = AppState::new();
-        assert_eq!(app.conn, ConnStatus::Connecting);
-        app.apply_bridge_event(
-            frame(CoreToUi::Ready {
-                version: Some("1".into()),
-                model: Some("glm-4".into()),
-            }),
-            0,
-        );
-        assert_eq!(
-            app.conn,
-            ConnStatus::Connected {
-                model: Some("glm-4".into())
-            }
-        );
-        assert_eq!(app.model.as_deref(), Some("glm-4"));
-        assert_eq!(app.conn.label(), "connected glm-4");
-    }
-
-    #[test]
-    fn streaming_begin_delta_end_assembles_block() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageBegin {
-                mid: "m1".into(),
-                role: "assistant".into(),
-            }),
-            100,
-        );
-        assert!(app.busy);
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageDelta {
-                mid: "m1".into(),
-                text: "Hello ".into(),
-            }),
-            100,
-        );
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageDelta {
-                mid: "m1".into(),
-                text: "世界".into(),
-            }),
-            100,
-        );
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageEnd {
-                mid: "m1".into(),
-                reason: "stop".into(),
-            }),
-            100,
-        );
-        assert!(!app.busy);
-        let last = app.transcript.last().unwrap();
-        assert_eq!(last.source, "Hello 世界");
-        assert_eq!(last.role, Role::Assistant);
-        assert!(last.finalized);
-    }
-
-    #[test]
-    fn child_exit_surfaces_reason_never_silent() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(BridgeEvent::ChildExited { code: Some(1) }, 0);
-        // The reason is surfaced as the CONNECTION STATUS (the footer chip renders
-        // it — N1 "never a silent disconnect"), NOT a transcript notice (§c).
-        match &app.conn {
-            ConnStatus::Disconnected { reason } => assert!(reason.contains("code 1")),
-            other => panic!("expected disconnected, got {other:?}"),
-        }
-        // It is NOT pushed as a transcript row (it would scroll away with the chat).
-        assert!(
-            !app.transcript.iter().any(|b| b.role == Role::Notice && b.source.contains("code 1")),
-            "a fatal exit is a connection status, not a transcript notice"
-        );
-        // It IS kept in the debug-only ring for a developer.
-        assert!(app.bridge_debug.iter().any(|l| l.contains("code 1")));
-    }
-
-    /// THE deliverable test (§c): bridge STDERR — especially GA's failover retry
-    /// diagnostic `[MixinSession] …retry N/M` — is SUPPRESSED from the transcript.
-    /// It never becomes a `[bridge]` row; it lands only in the debug-only ring.
-    #[test]
-    fn bridge_stderr_suppressed() {
-        let mut app = AppState::new();
-        let before = app.transcript.len();
-
-        // A failover retry notice on stderr (llmcore.py:988).
-        app.apply_bridge_event(
-            BridgeEvent::Stderr {
-                line: "[MixinSession] codex-pro overloaded, retry 1/10 (2.0s→4.0s)".into(),
-            },
-            0,
-        );
-        // A genuine-looking error on stderr (the OLD code would have made this a
-        // `[bridge]` row; now it is suppressed too — the transcript stays clean).
-        app.apply_bridge_event(
-            BridgeEvent::Stderr { line: "Traceback (most recent call last): Error here".into() },
-            0,
-        );
-        // Parse noise is suppressed as well.
-        app.apply_bridge_event(BridgeEvent::ParseNoise { line: "garbled json".into() }, 0);
-
-        // NOTHING reached the transcript.
-        assert_eq!(app.transcript.len(), before, "no stderr/noise row in the transcript");
-        assert!(
-            !app.transcript.iter().any(|b| b.source.contains("[bridge]")
-                || b.source.contains("MixinSession")
-                || b.source.contains("unparsed")),
-            "no `[bridge]`/retry/unparsed text in the transcript"
-        );
-        // But the diagnostics are kept in the debug-only ring (not lost).
-        assert!(app.bridge_debug.iter().any(|l| l.contains("MixinSession")));
-        assert!(app.bridge_debug.iter().any(|l| l.contains("Traceback")));
-        assert!(app.bridge_debug.iter().any(|l| l.contains("unparsed")));
-    }
-
-    #[test]
-    fn spawn_failed_is_visible_disconnect() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(
-            BridgeEvent::SpawnFailed {
-                detail: "python not found".into(),
-            },
-            0,
-        );
-        assert!(matches!(app.conn, ConnStatus::Disconnected { .. }));
-        assert!(app.conn.label().contains("python not found"));
-    }
-
-    #[test]
-    fn turn_elapsed_tracks_heat_clock() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageBegin {
-                mid: "m1".into(),
-                role: "assistant".into(),
-            }),
-            1_000,
-        );
-        assert_eq!(app.turn_elapsed_ms(1_500), 500);
-        // Idle after end → elapsed resets to 0.
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageEnd {
-                mid: "m1".into(),
-                reason: "stop".into(),
-            }),
-            2_000,
-        );
-        assert_eq!(app.turn_elapsed_ms(3_000), 0);
-    }
-
-    #[test]
-    fn tab_status_and_title_track_state() {
-        let mut app = AppState::new();
-        // Idle by default.
-        assert_eq!(app.tab_status(), TabStatus::Idle);
-        assert!(app.terminal_title().starts_with("GenericAgent"));
-
-        // Busy → Working + a spinner glyph leads the title.
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }),
-            0,
-        );
-        assert_eq!(app.tab_status(), TabStatus::Working);
-        assert!(!app.terminal_title().starts_with("GenericAgent"), "spinner glyph leads");
-
-        // A pending ask → Waiting wins over busy.
-        app.apply_bridge_event(
-            frame(CoreToUi::AskUser {
-                ask_id: "a1".into(),
-                question: "pick?".into(),
-                options: vec![],
-                free_text: true,
-            }),
-            0,
-        );
-        assert_eq!(app.tab_status(), TabStatus::Waiting);
-    }
-
-    /// An incoming `LlmList` opens the `/llm` picker overlay with the model rows,
-    /// pre-selecting the current model (N3 wiring at the app layer).
-    #[test]
-    fn llm_list_frame_opens_picker_on_current() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(
-            frame(CoreToUi::LlmList {
-                items: vec![
-                    LlmItem { idx: 0, name: "A/a".into(), current: false },
-                    LlmItem { idx: 1, name: "B/b".into(), current: true },
-                ],
-            }),
-            0,
-        );
-        match &app.overlay {
-            Some(Overlay::Picker { picker, .. }) => {
-                assert_eq!(picker.kind, crate::components::picker::PickerKind::Llm);
-                assert_eq!(picker.sel, 1, "opens on the current model");
-                assert_eq!(picker.selected_id(), Some(1));
-                // The row label is "idx. name" (the widget paints the ● for current).
-                assert_eq!(picker.selected().unwrap().label, "1. B/b");
-            }
-            other => panic!("expected an llm picker overlay, got {other:?}"),
-        }
-    }
-
-    /// A second ask_user that arrives while one is being answered QUEUES, and
-    /// surfaces after the first is resolved (§7 "queued parallel asks surface in
-    /// turn"). The queue is FIFO and no ask is dropped.
-    #[test]
-    fn queued_parallel_asks_surface_in_turn() {
-        let mut app = AppState::new();
-        // First ask → becomes the active pending ask + opens the card.
-        app.apply_bridge_event(
-            frame(CoreToUi::AskUser {
-                ask_id: "a1".into(),
-                question: "first?".into(),
-                options: vec![],
-                free_text: true,
-            }),
-            0,
-        );
-        assert_eq!(app.pending_ask.as_ref().unwrap().ask_id, "a1");
-        assert!(matches!(app.overlay, Some(Overlay::AskUser(_))));
-
-        // A second ask arrives while the first is active → it QUEUES (not dropped).
-        app.apply_bridge_event(
-            frame(CoreToUi::AskUser {
-                ask_id: "a2".into(),
-                question: "second?".into(),
-                options: vec![],
-                free_text: true,
-            }),
-            0,
-        );
-        assert_eq!(app.pending_ask.as_ref().unwrap().ask_id, "a1", "first stays active");
-        assert_eq!(app.ask_queue.len(), 1);
-
-        // Answering the first clears it; surfacing the next pops the queue → a2.
-        app.pending_ask = None;
-        app.overlay = None;
-        assert!(app.surface_next_ask());
-        assert_eq!(app.pending_ask.as_ref().unwrap().ask_id, "a2");
-        assert!(app.ask_queue.is_empty());
-        // No more queued → surface_next is a no-op.
-        app.pending_ask = None;
-        assert!(!app.surface_next_ask());
-    }
-
-    /// `/btw` answer routing (§7): a `BtwAnswer` fills the OPEN matching card and
-    /// NEVER touches the transcript (no history pollution); a stale `ask_id` is
-    /// ignored; and if the card was dismissed the answer is silently dropped. The
-    /// `/btw` card is also NON-modal (it doesn't steal input — chat stays usable).
-    #[test]
-    fn btw_answer_routes_to_card_not_history() {
-        let mut app = AppState::new();
-        let transcript_len_before = app.transcript.len();
-
-        // Open a /btw card (as the dispatcher does) and confirm it is NON-modal.
-        app.open_overlay(Overlay::Btw {
-            ask_id: "b1".into(),
-            question: "what is 6*7?".into(),
-            answer: None,
-        });
-        assert!(!app.overlay.as_ref().unwrap().is_modal(), "the /btw card is non-modal");
-
-        // A BtwAnswer for a DIFFERENT ask_id is ignored (the card stays querying).
-        app.apply_bridge_event(
-            frame(CoreToUi::BtwAnswer { ask_id: "stale".into(), text: Some("nope".into()), error: None }),
-            0,
-        );
-        match &app.overlay {
-            Some(Overlay::Btw { answer, .. }) => assert!(answer.is_none(), "stale id leaves the card querying"),
-            other => panic!("expected the btw card to remain, got {other:?}"),
-        }
-
-        // The matching BtwAnswer fills the card's answer — and NOT the transcript.
-        app.apply_bridge_event(
-            frame(CoreToUi::BtwAnswer { ask_id: "b1".into(), text: Some("42".into()), error: None }),
-            0,
-        );
-        match &app.overlay {
-            Some(Overlay::Btw { answer, .. }) => assert_eq!(answer.as_deref(), Some("42")),
-            other => panic!("expected the answered btw card, got {other:?}"),
-        }
-        assert_eq!(app.transcript.len(), transcript_len_before, "a /btw answer never pollutes history");
-
-        // An error answer shows a reason (still no history pollution).
-        app.open_overlay(Overlay::Btw { ask_id: "b2".into(), question: "q".into(), answer: None });
-        app.apply_bridge_event(
-            frame(CoreToUi::BtwAnswer { ask_id: "b2".into(), text: None, error: Some("no llm".into()) }),
-            0,
-        );
-        match &app.overlay {
-            Some(Overlay::Btw { answer, .. }) => assert!(answer.as_ref().unwrap().contains("no llm")),
-            other => panic!("expected an errored btw card, got {other:?}"),
-        }
-
-        // Dismissed (no card open) → the answer is silently dropped, no history.
-        app.overlay = None;
-        app.apply_bridge_event(
-            frame(CoreToUi::BtwAnswer { ask_id: "b1".into(), text: Some("late".into()), error: None }),
-            0,
-        );
-        assert!(app.overlay.is_none());
-        assert_eq!(app.transcript.len(), transcript_len_before, "a dropped /btw answer never pollutes history");
-    }
-
-    /// `RewindResult` is surfaced as a NOTICE (acknowledgment), not a streamed
-    /// message — so a rewind never spends a model turn. The active reducer folds it.
-    #[test]
-    fn rewind_result_surfaces_as_notice() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(frame(CoreToUi::RewindResult { dropped: 2, remaining: 3 }), 0);
-        assert!(
-            app.transcript.iter().any(|b| b.role == Role::Notice && b.source.contains('2')),
-            "the rewind confirmation lands as a notice: {:?}",
-            app.transcript.iter().map(|b| &b.source).collect::<Vec<_>>()
-        );
-        // It is NOT busy / streaming (no model turn spent).
-        assert!(!app.busy);
-    }
-
-    /// MessageEnd on an assistant block harvests its tool calls into the `/verbose`
-    /// audit trail (so the audit overlay isn't empty after tool use).
-    #[test]
-    fn message_end_harvests_tool_audit() {
-        let mut app = AppState::new();
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }),
-            0,
-        );
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageDelta {
-                mid: "m1".into(),
-                text: "🛠️ Tool: `file_read`\npath: config.toml\n→ ok".into(),
-            }),
-            0,
-        );
-        assert!(app.tool_audit.is_empty(), "not harvested until the block finalizes");
-        app.apply_bridge_event(
-            frame(CoreToUi::MessageEnd { mid: "m1".into(), reason: "stop".into() }),
-            0,
-        );
-        assert!(
-            app.tool_audit.iter().any(|l| l.contains("file_read")),
-            "the finalized assistant block's tool call lands in the audit: {:?}",
-            app.tool_audit
-        );
-    }
-
-    /// The `/cost` report formatter lays out input/output/cache/total/context%.
-    #[test]
-    fn cost_report_lines_format() {
-        let mut cost = CostBreakdown { input: 1200, output: 350, cache: 90, ..Default::default() };
-        cost.context_percent = Some(62.0);
-        cost.cost_usd = 0.1234;
-        let lines = cost.report_lines("glm-4");
-        assert!(lines[0].contains("glm-4"));
-        assert!(lines.iter().any(|l| l.contains("input") && l.contains("1200")));
-        assert!(lines.iter().any(|l| l.contains("output") && l.contains("350")));
-        assert!(lines.iter().any(|l| l.contains("total") && l.contains("1550")));
-        assert!(lines.iter().any(|l| l.contains("context") && l.contains("62%")));
-        assert_eq!(cost.total(), 1550);
-    }
-
-    /// `/language` switching flips the active language AND invalidates the render
-    /// cache so the next frame fully repaints in the new language (§9 "/language
-    /// full repaint"). Switching to the same language is a no-op (no needless
-    /// reflow). The cockpit then resolves labels through the new language.
-    #[test]
-    fn set_language_triggers_full_repaint() {
-        use crate::i18n::{self, Lang};
-        let mut app = AppState::new();
-        assert_eq!(app.lang, Lang::En);
-        // Prime the cache "synced" state so we can observe the invalidation.
-        app.last_width = 80;
-        // Same language → no-op (cache stays synced).
-        app.set_language(Lang::En);
-        assert_eq!(app.last_width, 80, "same-language switch does not invalidate");
-        // Switch to zh → lang changes AND the cache is invalidated (last_width=0
-        // forces a full rewidth on the next sync_transcript, the repaint hook).
-        app.set_language(Lang::Zh);
-        assert_eq!(app.lang, Lang::Zh);
-        assert_eq!(app.last_width, 0, "language switch invalidates the wrap cache (full repaint)");
-        // The cockpit now resolves a label through zh (the composer placeholder).
-        assert_eq!(
-            i18n::t(app.lang, "composer.placeholder"),
-            i18n::t(Lang::Zh, "composer.placeholder")
-        );
-        assert_ne!(
-            i18n::t(Lang::Zh, "conn.connecting"),
-            i18n::t(Lang::En, "conn.connecting"),
-            "the two languages render different strings"
-        );
-    }
-
-    #[test]
-    fn discover_git_branch_reads_head() {
-        let dir = std::env::temp_dir().join(format!("tui_v4_git_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(".git")).unwrap();
-        std::fs::write(dir.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        assert_eq!(super::discover_git_branch(&dir).as_deref(), Some("main"));
-
-        // Detached HEAD → short commit in parens.
-        std::fs::write(dir.join(".git").join("HEAD"), "abc1234deadbeef\n").unwrap();
-        assert_eq!(super::discover_git_branch(&dir).as_deref(), Some("(abc1234)"));
-
-        // Not a repo → None.
-        let _ = std::fs::remove_dir_all(dir.join(".git"));
-        assert!(super::discover_git_branch(&dir).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The multi-session glue (§6 / N2): opening the dashboard, switching swaps
-    /// the live transcript with the target session's, and a tagged event for a
-    /// non-active session updates ONLY that session's record (the cockpit's live
-    /// transcript is untouched), while a tagged event for the active session
-    /// flows through the live reducer.
-    #[test]
-    fn multi_session_switch_and_routing() {
-        use crate::app::View;
-        let root = std::env::temp_dir().join(format!("tui_v4_app_ms_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("temp")).unwrap();
-
-        let mut app = AppState::new();
-        app.attach_repo_root(root.clone());
-        let s1 = app.sessions.active; // session 1.
-
-        // Stream a reply into the ACTIVE session (s1) via a TAGGED event.
-        app.apply_tagged_event(
-            s1,
-            BridgeEvent::Frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() }),
-            10,
-        );
-        app.apply_tagged_event(
-            s1,
-            BridgeEvent::Frame(CoreToUi::MessageDelta { mid: "m1".into(), text: "reply for one".into() }),
-            10,
-        );
-        // The live transcript (cockpit) shows it.
-        assert!(app.transcript.iter().any(|b| b.source.contains("reply for one")));
-
-        // Create + switch to a second session; the live transcript is now empty.
-        app.snapshot_active_into_map();
-        let s2 = app.sessions.new_session(None);
-        app.load_active_session_after_structural_change(s2);
-        assert_eq!(app.sessions.active, s2);
-        assert!(app.transcript.is_empty(), "switching to a fresh session clears the live transcript");
-
-        // A TAGGED event for the NON-active session (s1) updates only s1's record;
-        // the live transcript (s2) stays empty.
-        app.apply_tagged_event(
-            s1,
-            BridgeEvent::Frame(CoreToUi::MessageBegin { mid: "m2".into(), role: "assistant".into() }),
-            20,
-        );
-        app.apply_tagged_event(
-            s1,
-            BridgeEvent::Frame(CoreToUi::MessageDelta { mid: "m2".into(), text: "background work".into() }),
-            20,
-        );
-        assert!(app.transcript.is_empty(), "a background session's stream never touches the active transcript");
-        assert!(app
-            .sessions
-            .session(s1)
-            .unwrap()
-            .transcript
-            .iter()
-            .any(|b| b.source.contains("background work")));
-
-        // Open the dashboard, switch back to s1 → its full transcript is restored.
-        app.open_dashboard();
-        assert_eq!(app.view, View::Dashboard);
-        app.switch_session(s1);
-        assert_eq!(app.view, View::Cockpit);
-        assert_eq!(app.sessions.active, s1);
-        assert!(app.transcript.iter().any(|b| b.source.contains("reply for one")));
-        assert!(app.transcript.iter().any(|b| b.source.contains("background work")));
-
-        // Esc-style close returns to cockpit and is idempotent.
-        app.open_dashboard();
-        app.close_dashboard();
-        assert_eq!(app.view, View::Cockpit);
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// THE wiring test: `/workflows` opens the full-screen panel, LAZILY starts the
-    /// singleton watcher (its own thread) + ACTIVATES it, and `Esc`-close returns to
-    /// the cockpit while PARKING the watcher (zero idle traffic). Re-opening reuses
-    /// the same watcher (no second thread). Dropping the app joins the thread.
-    #[test]
-    fn workflows_panel_open_close_drives_watcher() {
-        let root = std::env::temp_dir().join(format!("tui_v4_app_wf_open_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("temp")).unwrap();
-
-        let mut app = AppState::new();
-        app.attach_repo_root(root.clone());
-
-        // No watcher until the panel is first opened (a user who never opens
-        // /workflows spawns no thread — the §3 lazy-start contract).
-        assert!(app.workflow_watcher.is_none());
-        assert_eq!(app.view, View::Cockpit);
-
-        // Open → the panel becomes the active view, a watcher exists + is ACTIVE.
-        app.open_workflows();
-        assert_eq!(app.view, View::Workflows);
-        assert!(app.workflow_watcher.is_some());
-        assert!(app.workflow_watcher.as_ref().unwrap().is_active(), "open activates the watcher");
-
-        // Close (Esc) → back to the cockpit, watcher PARKED (still alive, not active).
-        app.close_workflows();
-        assert_eq!(app.view, View::Cockpit);
-        assert!(app.workflow_watcher.is_some(), "the watcher persists (parked) across close");
-        assert!(!app.workflow_watcher.as_ref().unwrap().is_active(), "close parks the watcher");
-
-        // Re-open reuses the SAME watcher (lazy-start only happens once) and
-        // re-activates it.
-        app.open_workflows();
-        assert!(app.workflow_watcher.as_ref().unwrap().is_active(), "re-open re-activates");
-
-        // Dropping the app drops the watcher, which joins its thread within a bound
-        // (no hang) — proven by this test returning.
-        drop(app);
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// `/conductor /hive /goal` are "forward + open the /workflows tile": forwarding
-    /// the command ALSO opens the panel so the user watches the live tree the watcher
-    /// populates. We exercise the open side of that route here (the forward side is a
-    /// bridge send covered elsewhere) by calling `open_workflows` the dispatcher
-    /// invokes, and confirm a non-routing command does NOT open it.
-    #[test]
-    fn orchestration_commands_open_the_panel() {
-        let root = std::env::temp_dir().join(format!("tui_v4_app_wf_route_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("temp")).unwrap();
-        let mut app = AppState::new();
-        app.attach_repo_root(root.clone());
-
-        // The three orchestration verbs route to the panel (the dispatcher matches
-        // exactly this set — keep this list in lock-step with `dispatch_slash`).
-        for name in ["goal", "hive", "conductor"] {
-            assert!(
-                matches!(name, "goal" | "hive" | "conductor"),
-                "the panel-opening set is {{goal,hive,conductor}}"
-            );
-        }
-        // A representative open (what the dispatcher does after forwarding /conductor).
-        app.open_workflows();
-        assert_eq!(app.view, View::Workflows);
-
-        drop(app);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The snapshot→panel feed: `refresh_workflow_snapshot` pulls the watcher's
-    /// latest merged snapshot into `AppState` and re-clamps the panel focus. With a
-    /// real conductor down (no server on the gate box) the merge still yields the
-    /// Conductor group placeholder, so the panel has a non-empty snapshot to render
-    /// and `focused_node` resolves (or is None on a node-less down snapshot) without
-    /// panicking — the load-bearing "never blocks / never panics" guarantee.
-    #[test]
-    fn refresh_feeds_snapshot_into_panel() {
-        let root = std::env::temp_dir().join(format!("tui_v4_app_wf_feed_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("temp")).unwrap();
-        let mut app = AppState::new();
-        app.attach_repo_root(root.clone());
-
-        app.open_workflows();
-        // Give the watcher up to a few poll intervals to publish its first merge.
-        let deadline = std::time::Instant::now() + crate::workflow::POLL_INTERVAL * 6;
-        while app.workflow_watcher.as_ref().map(|w| w.generation()).unwrap_or(0) == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            app.refresh_workflow_snapshot();
-        }
-        app.refresh_workflow_snapshot();
-        // The watcher always merges a Conductor workflow (a down placeholder when
-        // :8900 is closed), so the app's snapshot is non-empty and the panel can
-        // render it. The exact running state depends on the environment.
-        assert!(
-            app.workflow_snapshot
-                .workflows
-                .iter()
-                .any(|w| w.kind == crate::workflow::schema::WorkflowKind::Conductor),
-            "refresh feeds the merged conductor group into the panel's snapshot"
-        );
-        // Focus resolution never panics on the fed snapshot (None on a node-less
-        // down snapshot is fine).
-        let _ = app.workflow_panel.focused_node(&app.workflow_snapshot);
-
-        drop(app);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-}
+mod tests;

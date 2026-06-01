@@ -19,6 +19,9 @@ pub const DEFAULT_SKIP_DIRS: &[&str] = &[
     ".hg",
     ".svn",
     "target",
+    // This repo's giant log/scratch tree (model_responses dumps, clones); walking it
+    // dominated the `@`-picker walk cost (Q12). Skipped alongside build artifacts.
+    "temp",
     "node_modules",
     "__pycache__",
     ".venv",
@@ -269,6 +272,19 @@ mod tests {
         assert!(r.is_ignored("target/debug/foo", false)); // nested under target.
         assert!(r.is_ignored("node_modules/x/y.js", false));
         assert!(!r.is_ignored("src/main.rs", false));
+    }
+
+    #[test]
+    fn default_skip_excludes_temp() {
+        // This repo's giant `temp/` log tree dominated the @-picker walk; it must be
+        // skipped by the default ignore set (both the dir itself and anything nested
+        // under it), same as `target` (Q12 @ speed).
+        let r = IgnoreRules::with_defaults();
+        assert!(r.is_ignored("temp", true));
+        assert!(r.is_ignored("temp/model_responses/dump_42.txt", false));
+        // A non-temp sibling must still be listable (no over-broad match).
+        assert!(!r.is_ignored("template.rs", false));
+        assert!(!r.is_ignored("src/temptation.rs", false));
     }
 
     #[test]

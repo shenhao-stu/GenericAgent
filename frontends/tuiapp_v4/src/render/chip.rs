@@ -7,12 +7,13 @@
 //!
 //!     ⏺ web_scan {"tabs_only": true}
 //!       [Info] 3 tabs scanned · ok
-//!       … +2 more
+//!       ▸ +2 more
 //!
 //! `⏺` (BLACK_CIRCLE, done) / `○` (figures.circle, running/pending) bullet +
 //! tool name (colored by status) + a dim one-line args + the result indented two
-//! columns, dim, truncated to a few lines with `… +N more`. NO box. (CC:
-//! `AssistantToolUseMessage.tsx` / `_CoordinatorAgentStatus.tsx:144`.)
+//! columns, dim, truncated to a few lines with a CLICKABLE `▸ +N more` triangle
+//! (Fix E / Q8: click it to expand the full result; a `▾` then collapses it). NO
+//! box. (CC: `AssistantToolUseMessage.tsx` / `_CoordinatorAgentStatus.tsx:144`.)
 //!
 //! The marker is `🛠️ name(args)` — **NOT** `🛠️ Tool:` (the old verbose form). The
 //! result is everything after the header line up to the next `🛠️` / `Turn N` /
@@ -255,13 +256,20 @@ pub fn find_turn_line(s: &str) -> Option<usize> {
 
 /// Render a tool call as the rows of a CC bullet (redesign_cc.md §2.3): a header
 /// `⏺ name  args` (bullet + name colored by status, args dim) and the result
-/// indented two columns, dim, truncated to `max_preview` lines with a `… +N more`
-/// tail. Returns PLAIN strings (the markdown layer styles them by row kind). The
-/// first row is the bullet/header; the rest are the indented result. PURE.
+/// indented two columns, dim. Returns PLAIN strings (the markdown layer styles them
+/// by row kind). The first row is the bullet/header; the rest are the indented
+/// result. PURE.
+///
+/// Folding (Fix E / Q8): when `expanded` is false the result is truncated to
+/// `max_preview` rows and, if it overflows, the dead `… +N more` text becomes a
+/// CLICKABLE `▸ +N more` triangle affordance (click its column to expand). When
+/// `expanded` is true the truncation is SKIPPED — every result line is emitted —
+/// and a `▾` collapse affordance closes the row. A result that fits in `max_preview`
+/// needs no affordance either way (nothing to expand).
 ///
 /// `width` clips long rows so a bullet never wraps unexpectedly (the caller's
 /// styled soft-wrap re-wraps anyway, but clipping the header keeps it tidy).
-pub fn render_chip_bullet(call: &ToolCall, width: u16, max_preview: usize) -> ChipBullet {
+pub fn render_chip_bullet(call: &ToolCall, width: u16, max_preview: usize, expanded: bool) -> ChipBullet {
     let width = (width as usize).max(8);
     let bullet = call.status.bullet();
 
@@ -269,7 +277,8 @@ pub fn render_chip_bullet(call: &ToolCall, width: u16, max_preview: usize) -> Ch
     let header_name = format!("{bullet} {}", call.name);
     let args_oneline = collapse_oneline(&call.args);
 
-    // The result: each line indented 2 cols, truncated to max_preview rows.
+    // The result: each non-blank line indented 2 cols. Collapsed → at most
+    // `max_preview` rows; expanded → ALL rows (truncation skipped).
     let mut result_rows: Vec<String> = Vec::new();
     let mut total = 0usize;
     for raw in call.result.lines() {
@@ -279,15 +288,22 @@ pub fn render_chip_bullet(call: &ToolCall, width: u16, max_preview: usize) -> Ch
             continue;
         }
         total += 1;
-        if result_rows.len() < max_preview {
+        if expanded || result_rows.len() < max_preview {
             // Indent 2 cols; clip to width so it stays one logical row pre-wrap.
             let body = clip_cells(line, width.saturating_sub(2));
             result_rows.push(format!("  {body}"));
         }
     }
-    let overflow = total.saturating_sub(max_preview);
-    if overflow > 0 {
-        result_rows.push(format!("  … +{overflow} more"));
+    // The expand/collapse affordance row — a clickable triangle, NOT dead text. Only
+    // shown when the result is long enough to fold (> max_preview rows).
+    let expandable = total > max_preview;
+    if expandable {
+        if expanded {
+            result_rows.push("  ▾".to_string());
+        } else {
+            let overflow = total - max_preview;
+            result_rows.push(format!("  ▸ +{overflow} more"));
+        }
     }
 
     ChipBullet {
@@ -295,6 +311,7 @@ pub fn render_chip_bullet(call: &ToolCall, width: u16, max_preview: usize) -> Ch
         args: args_oneline,
         result_rows,
         status: call.status,
+        expandable,
     }
 }
 
@@ -305,10 +322,16 @@ pub struct ChipBullet {
     pub header_name: String,
     /// The dim one-line args (`{"tabs_only": true}`), possibly empty.
     pub args: String,
-    /// The 2-col-indented, dim result rows (already truncated + `… +N more`).
+    /// The 2-col-indented, dim result rows (plus a `▸`/`▾` affordance row when the
+    /// result is long enough to fold).
     pub result_rows: Vec<String>,
     /// The status (so the renderer colors the bullet/name).
     pub status: ToolStatus,
+    /// True when the result overflowed `max_preview` and so carries a fold
+    /// affordance (`▸ +N more` collapsed / `▾` expanded). Lets the markdown layer
+    /// register the whole bullet as a clickable [`NodeId::Tool`](crate::render::fold)
+    /// hit target only when there's actually something to expand.
+    pub expandable: bool,
 }
 
 #[allow(dead_code)] // row accessor (used by tests).
@@ -438,7 +461,7 @@ host = localhost";
             result: "[Info] 3 tabs scanned · ok".into(),
             status: ToolStatus::Ok,
         };
-        let chip = render_chip_bullet(&call, 80, 4);
+        let chip = render_chip_bullet(&call, 80, 4, false);
         // CC done bullet + name.
         assert_eq!(chip.status.bullet(), "⏺");
         assert!(chip.header_name.starts_with("⏺ web_scan"));
@@ -462,13 +485,13 @@ host = localhost";
             result: "Waiting for your answer ...".into(),
             status: ToolStatus::Pending,
         };
-        let chip = render_chip_bullet(&call, 40, 4);
+        let chip = render_chip_bullet(&call, 40, 4, false);
         assert_eq!(chip.status.bullet(), "○", "running/pending = hollow circle");
         assert_eq!(chip.header_name, "○ ask_user");
     }
 
     #[test]
-    fn result_overflow_collapses_to_plus_n_more() {
+    fn result_overflow_collapses_to_clickable_triangle() {
         let call = ToolCall {
             id: 1,
             name: "x".into(),
@@ -476,10 +499,53 @@ host = localhost";
             result: (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
             status: ToolStatus::Ok,
         };
-        let chip = render_chip_bullet(&call, 30, 3);
-        // 10 lines, max 3 preview → 3 indented rows + a `… +7 more` tail.
+        let chip = render_chip_bullet(&call, 30, 3, false);
+        // 10 lines, max 3 preview → 3 indented rows + a CLICKABLE `▸ +7 more`
+        // affordance (a triangle, NOT the old dead `… +N more` text).
         assert_eq!(chip.result_rows.len(), 4);
-        assert!(chip.result_rows.last().unwrap().contains("… +7 more"));
+        assert!(chip.expandable, "an overflowing result is foldable");
+        let tail = chip.result_rows.last().unwrap();
+        assert!(tail.contains("▸ +7 more"), "triangle affordance: {tail:?}");
+        assert!(!tail.contains('…'), "the dead ellipsis text is gone: {tail:?}");
+    }
+
+    /// Fix E acceptance: an EXPANDED tool result skips the `max_preview` truncation
+    /// (every result line is emitted) and swaps the `▸ +N more` affordance for a `▾`
+    /// collapse triangle — there is no dead `… +N more` text in either state.
+    #[test]
+    fn expanded_tool_result_skips_truncation() {
+        let call = ToolCall {
+            id: 1,
+            name: "x".into(),
+            args: String::new(),
+            result: (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+            status: ToolStatus::Ok,
+        };
+        // Collapsed: 3 preview rows + the affordance = 4.
+        let collapsed = render_chip_bullet(&call, 30, 3, false);
+        assert_eq!(collapsed.result_rows.len(), 4);
+
+        // Expanded: ALL 10 result rows + a `▾` collapse affordance = 11.
+        let expanded = render_chip_bullet(&call, 30, 3, true);
+        assert_eq!(expanded.result_rows.len(), 11, "all 10 lines + the ▾ affordance");
+        assert!(expanded.expandable);
+        for i in 0..10 {
+            assert!(
+                expanded.result_rows.iter().any(|r| r.contains(&format!("line {i}"))),
+                "expanded result must contain every line (line {i} missing)"
+            );
+        }
+        let tail = expanded.result_rows.last().unwrap();
+        assert!(tail.trim() == "▾", "expanded affordance is a ▾ collapse triangle: {tail:?}");
+        assert!(!expanded.result_rows.iter().any(|r| r.contains("more")), "no `+N more` when expanded");
+
+        // A result that FITS in max_preview is not foldable in either state.
+        let small = ToolCall {
+            id: 2, name: "y".into(), args: String::new(),
+            result: "one\ntwo".into(), status: ToolStatus::Ok,
+        };
+        assert!(!render_chip_bullet(&small, 30, 4, false).expandable);
+        assert!(!render_chip_bullet(&small, 30, 4, true).expandable);
     }
 
     #[test]
@@ -491,7 +557,7 @@ host = localhost";
             result: "结果在这里很长很长很长很长很长很长很长很长很长很长".into(),
             status: ToolStatus::Ok,
         };
-        let chip = render_chip_bullet(&call, 24, 4);
+        let chip = render_chip_bullet(&call, 24, 4, false);
         // The indented result clips to width (CJK counted as 2 cells), so it never
         // overshoots the bullet column budget pre-wrap.
         for row in &chip.result_rows {

@@ -466,7 +466,7 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         terminal
             .draw(|f| {
                 let area = f.area();

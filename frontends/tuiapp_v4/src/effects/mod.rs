@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn palette_from_theme_uses_tokens() {
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let pal = EffectPalette::from_theme(&theme);
         assert_eq!(pal.fire_hot, theme.color(Token::Warning));
         assert_eq!(pal.sparkle, theme.color(Token::Success));

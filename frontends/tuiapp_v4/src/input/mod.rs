@@ -24,9 +24,12 @@
 pub mod file_expand;
 pub mod history;
 pub mod keychord;
+pub mod keymap;
+pub mod mouse;
 pub mod paste;
 pub mod paths;
 pub mod shell;
+pub mod views;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;

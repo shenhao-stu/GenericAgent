@@ -59,6 +59,15 @@ pub struct Block {
     /// True once the block is finalized (`MessageEnd`, or a synchronous block).
     /// Streaming blocks are `false` until then; a renderer may show a caret.
     pub finalized: bool,
+    /// Per-HARD-LINE atomic (never-soft-wrap-split) byte ranges, indexed by
+    /// hard-line (same order as [`Block::hard_lines`]); each range is in that hard
+    /// line's LOCAL byte coordinates. Empty (the common case) ⇒ ordinary wrapping.
+    ///
+    /// Set by the assistant projection ([`crate::app::Block::to_render_block`]) so
+    /// the wrap cache keeps a rendered inline-math glyph run intact, matching the
+    /// styled draw row-for-row (P1, the parity invariant). For non-assistant /
+    /// math-free blocks it stays empty and wrapping is unchanged.
+    pub atomic_ranges: Vec<Vec<std::ops::Range<usize>>>,
 }
 
 #[allow(dead_code)] // streaming-construction API is the spec deliverable (tested).
@@ -71,6 +80,7 @@ impl Block {
             source: source.into(),
             rev: 1,
             finalized: true,
+            atomic_ranges: Vec::new(),
         }
     }
 
@@ -83,7 +93,15 @@ impl Block {
             source: String::new(),
             rev: 1,
             finalized: false,
+            atomic_ranges: Vec::new(),
         }
+    }
+
+    /// Attach per-hard-line atomic (no-soft-wrap-split) byte ranges, then return
+    /// self (builder style). See [`Block::atomic_ranges`].
+    pub fn with_atomic_ranges(mut self, ranges: Vec<Vec<std::ops::Range<usize>>>) -> Self {
+        self.atomic_ranges = ranges;
+        self
     }
 
     /// Append a streamed delta to the source and bump `rev` so the wrap cache

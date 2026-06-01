@@ -167,6 +167,26 @@ def _bound(s, limit=MAX_TEXT):
     return s
 
 
+def _deicon_restore(msg, n):
+    """De-iconify continue_cmd.restore's banner (Q10: "no ✅").
+
+    continue_cmd returns strings like "✅ 已恢复 N 轮完整对话（name）\n(…)"; the user
+    explicitly does not want the leading status glyph. Strip ONE leading
+    ✅/⚠️/❌ (plus surrounding space) and keep the informative remainder. `n` (the
+    replayed-bubble count) is accepted for call-site symmetry / future copy; the
+    banner text already carries the round count, so it is not interpolated here.
+    Bounded like every other emitted field. Never edits GA-core continue_cmd.py
+    (shared by v2/v3/st/tg/dc/qt) — the strip lives in the bridge.
+    """
+    del n  # the banner already carries the count; kept for call symmetry.
+    s = (msg or "").lstrip()
+    for g in ("✅", "⚠️", "❌"):
+        if s.startswith(g):
+            s = s[len(g):].lstrip()
+            break
+    return _bound(s)
+
+
 def _is_user_msg(msg):
     """True if a backend.history entry is a USER message (a "real turn" anchor).
     Tolerant of dict / object shapes (`.role` attr or `['role']` key)."""
@@ -722,10 +742,13 @@ class Bridge:
         375-395). Used by the multi-session UI's `branch`/`/continue` so a new
         bridge child remembers a prior conversation.
 
-        Emits a system MessageBegin/Delta/MessageEnd carrying the human-readable
-        restore result (the same '✅ 已恢复 N 轮…' / '⚠️…' / '❌…' strings
-        continue_cmd returns) so the UI gets feedback, and never hangs: every
-        path emits exactly one frame triple or an Error.
+        Replays the FULL prior conversation into the visible transcript (Q10 / v3
+        parity, tui_v3.py:4129): after continue_cmd.restore writes backend.history,
+        continue_cmd.extract_ui_messages(path) parses the log into [{role, content}]
+        bubbles and each becomes one MessageBegin/Delta/End triple, THEN the
+        de-iconified restore banner (no ✅, via _deicon_restore) as the final system
+        line. Never hangs: every path emits frames or an Error. A failed extract
+        degrades to just the banner (the model still remembers via backend.history).
         """
         if self._agent is None:
             self.emit_error("agent not initialized", code="no_agent", fatal=False)
@@ -743,10 +766,26 @@ class Bridge:
                 _eprint("[ga_bridge] restore failed:\n" + traceback.format_exc())
                 self.emit_error("restore failed: %s" % exc, code="restore", fatal=False)
                 return
-        # Surface the result as a one-shot system message (bounded).
+            bubbles = []
+            try:
+                bubbles = continue_cmd.extract_ui_messages(path) or []
+            except Exception:
+                _eprint("[ga_bridge] extract_ui_messages failed:\n" + traceback.format_exc())
+        # Replay the prior conversation as ordinary frames (the UI renders them
+        # through the existing transcript path — no Rust change for the replay).
+        for b in bubbles:
+            content = _bound(str((b or {}).get("content") or ""))
+            if not content.strip():
+                continue
+            role = "user" if (b or {}).get("role") == "user" else "assistant"
+            bmid = self._new_mid()
+            self.emit({"type": "MessageBegin", "mid": bmid, "role": role})
+            self.emit({"type": "MessageDelta", "mid": bmid, "text": content})
+            self.emit({"type": "MessageEnd", "mid": bmid, "reason": "stop"})
+        # Finally, the de-iconified restore banner as a one-shot system line.
         mid = self._new_mid()
         self.emit({"type": "MessageBegin", "mid": mid, "role": "system"})
-        self.emit({"type": "MessageDelta", "mid": mid, "text": _bound(str(msg))})
+        self.emit({"type": "MessageDelta", "mid": mid, "text": _deicon_restore(msg, len(bubbles))})
         self.emit({"type": "MessageEnd", "mid": mid, "reason": "stop"})
 
     @staticmethod

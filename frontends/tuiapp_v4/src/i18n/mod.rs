@@ -214,6 +214,10 @@ pub const TIPS_EN: &[&str] = &[
     "Tip: Ctrl+S opens the session dashboard; describe a task to start a new session.",
     "Tip: @path inlines a project file into your message (gitignore-aware path completion).",
     "Tip: /scheduler picks reflect tasks to run on a cron; /emoji changes the spinner + pet.",
+    // -- C5-appendix additions (scheduler / mouse / continue) -----------------
+    "Tip: /scheduler lists every reflect mode (reflect/*.py) and cron task (sche_tasks/*.json) — tick to start, untick to stop.",
+    "Tip: mouse capture is off by default — drag to select & copy natively; Ctrl+Shift+M toggles wheel scroll.",
+    "Tip: after /continue the full prior conversation replays into the transcript, not just a one-line summary.",
 ];
 
 /// Simplified-Chinese usage tips (ported from tui_v3 `_TIPS['zh']`).
@@ -233,6 +237,10 @@ pub const TIPS_ZH: &[&str] = &[
     "Tip: Ctrl+S 打开会话面板；描述一个任务即可开启新会话。",
     "Tip: @path 把项目文件内联进消息（路径补全会跳过 .gitignore）。",
     "Tip: /scheduler 勾选要定时运行的 reflect 任务；/emoji 切换 spinner 与桌宠。",
+    // -- C5-appendix additions (scheduler / mouse / continue) -----------------
+    "Tip: /scheduler 列出所有反射模式（reflect/*.py）与定时任务（sche_tasks/*.json）—— 勾选启动，取消勾选停止。",
+    "Tip: 默认关闭鼠标捕获 —— 拖动即可原生选中复制；Ctrl+Shift+M 切换滚轮滚动。",
+    "Tip: /continue 之后会把完整的历史对话重放进窗口，而不只是一行摘要。",
 ];
 
 /// The tip pool for a language. PURE.
@@ -325,6 +333,27 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("help.group.fwd", "Core-forwarded"),
     ("help.magic", "Magic prefixes:  !cmd  run a host shell line   ·   @path  inline a project file"),
     ("help.close", "esc / q  close"),
+    ("help.alias_of", "alias of"),
+    // -- /keybindings ---------------------------------------------------------
+    ("keybindings.title", "Keyboard shortcuts · /keybindings"),
+    ("kb.submit", "send the message"),
+    ("kb.newline", "insert a newline (multi-line input)"),
+    ("kb.palette", "open the command palette"),
+    ("kb.complete", "complete the highlighted command / @path"),
+    ("kb.copy_reply", "copy the last reply (clean, no soft-wraps)"),
+    ("kb.fold", "fold / unfold all completed tool chips"),
+    ("kb.mouse", "toggle mouse capture (wheel scroll ⇄ native select)"),
+    ("kb.scroll", "scroll the transcript"),
+    ("kb.views", "switch chat ⇄ session dashboard"),
+    ("kb.dashboard", "open the session dashboard"),
+    ("kb.new_session", "create + switch to a new session"),
+    ("kb.cycle_session", "previous / next session"),
+    ("kb.drop_session", "close the active session"),
+    ("kb.branch", "fork the session with copied history"),
+    ("kb.theme", "open the theme picker"),
+    ("kb.help", "show these shortcuts"),
+    ("kb.escape", "back · Esc twice rewinds"),
+    ("kb.quit", "abort / quit"),
     // -- /status --------------------------------------------------------------
     ("status.title", "Status · /status"),
     ("status.model", "model"),
@@ -380,6 +409,18 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("scheduler.cron_none", "no cron jobs scheduled"),
     ("scheduler.will_start", "will start"),
     ("scheduler.will_stop", "will stop"),
+    // The two row kinds the discovery surfaces (reflect/*.py vs sche_tasks/*.json).
+    ("scheduler.kind.reflect", "reflect mode"),
+    ("scheduler.kind.cron", "cron task"),
+    // The cadence label for a reflect mode (a watcher, not a cron job). Cron tasks
+    // render their RAW legal `repeat` grammar (below) verbatim — never an HH:MM.
+    ("scheduler.cadence.reflect", "watcher"),
+    ("scheduler.repeat.once", "once"),
+    ("scheduler.repeat.daily", "daily"),
+    ("scheduler.repeat.weekday", "weekdays"),
+    ("scheduler.repeat.weekly", "weekly"),
+    ("scheduler.repeat.monthly", "monthly"),
+    ("scheduler.empty", "no reflect modes or cron tasks found"),
     // -- /continue ------------------------------------------------------------
     ("continue.title", "Continue · search sessions"),
     ("continue.search", "search: "),
@@ -389,6 +430,10 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("continue.no_match", "no sessions match your search"),
     ("continue.restoring", "restoring session…"),
     ("continue.rounds", "rounds"),
+    // The icon-free restore banner copy (Q10: no ✅). The bridge strips the glyph
+    // from continue_cmd's string; these are the UI-owned equivalents.
+    ("continue.restored", "restored {n} turns"),
+    ("continue.replaying", "replaying conversation…"),
     // -- /rewind --------------------------------------------------------------
     ("rewind.empty", "nothing to rewind (no turns yet)"),
     ("rewind.turn", "turn"),
@@ -526,6 +571,7 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("copy.label.transcript", "transcript"),
     ("mouse.on", "mouse capture on (wheel scroll · click dashboard)"),
     ("mouse.off", "mouse capture off — drag to select, then copy in your terminal"),
+    ("mouse.hint.native", "drag to select & copy natively; Ctrl+Shift+M re-enables wheel scroll"),
     ("misc.none", "—"),
     ("misc.yes", "yes"),
     ("misc.no", "no"),
@@ -589,6 +635,27 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("help.group.fwd", "转发核心"),
     ("help.magic", "魔法前缀：  !cmd  运行主机 shell   ·   @path  内联项目文件"),
     ("help.close", "esc / q  关闭"),
+    ("help.alias_of", "等同于"),
+    // -- /keybindings ---------------------------------------------------------
+    ("keybindings.title", "键盘快捷键 · /keybindings"),
+    ("kb.submit", "发送消息"),
+    ("kb.newline", "插入换行（多行输入）"),
+    ("kb.palette", "打开命令面板"),
+    ("kb.complete", "补全高亮的命令 / @path"),
+    ("kb.copy_reply", "复制最后回复（干净、无软换行）"),
+    ("kb.fold", "折叠 / 展开所有已完成的工具 chip"),
+    ("kb.mouse", "切换鼠标捕获（滚轮滚动 ⇄ 原生选中）"),
+    ("kb.scroll", "滚动对话记录"),
+    ("kb.views", "在对话 ⇄ 会话面板间切换"),
+    ("kb.dashboard", "打开会话面板"),
+    ("kb.new_session", "新建并切换到新会话"),
+    ("kb.cycle_session", "上一个 / 下一个会话"),
+    ("kb.drop_session", "关闭当前会话"),
+    ("kb.branch", "复制历史并分叉会话"),
+    ("kb.theme", "打开主题选择器"),
+    ("kb.help", "显示这些快捷键"),
+    ("kb.escape", "返回 · 连按两次 Esc 回退"),
+    ("kb.quit", "中止 / 退出"),
     // -- /status --------------------------------------------------------------
     ("status.title", "状态 · /status"),
     ("status.model", "模型"),
@@ -644,6 +711,15 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("scheduler.cron_none", "没有已排程的 cron 任务"),
     ("scheduler.will_start", "将启动"),
     ("scheduler.will_stop", "将停止"),
+    ("scheduler.kind.reflect", "反射模式"),
+    ("scheduler.kind.cron", "定时任务"),
+    ("scheduler.cadence.reflect", "监控守护"),
+    ("scheduler.repeat.once", "一次"),
+    ("scheduler.repeat.daily", "每日"),
+    ("scheduler.repeat.weekday", "工作日"),
+    ("scheduler.repeat.weekly", "每周"),
+    ("scheduler.repeat.monthly", "每月"),
+    ("scheduler.empty", "未找到反射模式或定时任务"),
     // -- /continue ------------------------------------------------------------
     ("continue.title", "继续 · 搜索会话"),
     ("continue.search", "搜索："),
@@ -653,6 +729,8 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("continue.no_match", "没有匹配搜索的会话"),
     ("continue.restoring", "正在恢复会话…"),
     ("continue.rounds", "轮"),
+    ("continue.restored", "已恢复 {n} 轮对话"),
+    ("continue.replaying", "正在重放历史对话…"),
     // -- /rewind --------------------------------------------------------------
     ("rewind.empty", "无可回退内容（还没有对话轮次）"),
     ("rewind.turn", "第"),
@@ -790,6 +868,7 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("copy.label.transcript", "对话记录"),
     ("mouse.on", "鼠标捕获已开启（滚轮滚动 · 点击进面板）"),
     ("mouse.off", "鼠标捕获已关闭——拖动选中后用终端自带复制"),
+    ("mouse.hint.native", "拖动即可原生选中复制；Ctrl+Shift+M 重新开启滚轮滚动"),
     ("misc.none", "—"),
     ("misc.yes", "是"),
     ("misc.no", "否"),

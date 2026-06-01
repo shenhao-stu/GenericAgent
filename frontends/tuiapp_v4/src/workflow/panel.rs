@@ -20,6 +20,8 @@
 //! menu); the renderer below only PAINTS, routing every string through i18n and
 //! every color through a theme [`Token`] (no hardcoded RGB).
 
+use std::cell::Cell;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -167,8 +169,11 @@ pub struct WorkflowPanel {
     pub style: RenderStyle,
     /// Top visible row (scroll offset) for the tree list. PERSISTENT across frames
     /// (the stateful viewport top) so a content-only refresh never snaps the view;
-    /// updated by [`WorkflowPanel::scroll_to_focus`] from the renderer.
-    pub scroll: usize,
+    /// updated by [`WorkflowPanel::scroll_to_focus`] from the renderer. A `Cell` so
+    /// the renderer can persist the focus-driven viewport top from an immutable
+    /// `&WorkflowPanel` (render is pure — P11; mirrors the cockpit's `sync_transcript`
+    /// hoist), single-threaded so interior mutability is free.
+    pub scroll: Cell<usize>,
     /// When `Some`, the DETAIL overlay is open on `(wf_idx, node_idx)` with the
     /// action-menu selection `action_sel`. Enter opens it; Esc closes it.
     pub detail: Option<DetailState>,
@@ -191,7 +196,7 @@ impl Default for WorkflowPanel {
         WorkflowPanel {
             focus: 0,
             style: RenderStyle::default(),
-            scroll: 0,
+            scroll: Cell::new(0),
             detail: None,
             last_generation: 0,
         }
@@ -302,27 +307,31 @@ impl WorkflowPanel {
     /// the cursor on-screen). Unlike a per-frame recompute, the offset is REMEMBERED
     /// in `self.scroll`, so a refresh that only changes node previews doesn't snap the
     /// view — it only moves when the focus would leave the window. Returns the clamped
-    /// top row. PURE over `(self, focus_line, total, height)`.
-    pub fn scroll_to_focus(&mut self, focus_line: usize, total: usize, height: usize) -> usize {
+    /// top row. PURE over `(self, focus_line, total, height)`; takes `&self` and
+    /// persists through the `scroll` [`Cell`] so the renderer can call it on an
+    /// immutable panel (render purity — P11).
+    pub fn scroll_to_focus(&self, focus_line: usize, total: usize, height: usize) -> usize {
         if height == 0 || total <= height {
             // Everything fits → pin to the top.
-            self.scroll = 0;
+            self.scroll.set(0);
             return 0;
         }
         let max_scroll = total - height;
+        let mut scroll = self.scroll.get();
         // Scroll up if the focus is above the window.
-        if focus_line < self.scroll {
-            self.scroll = focus_line;
+        if focus_line < scroll {
+            scroll = focus_line;
         }
         // Scroll down if the focus is at/below the bottom of the window.
-        else if focus_line >= self.scroll + height {
-            self.scroll = focus_line + 1 - height;
+        else if focus_line >= scroll + height {
+            scroll = focus_line + 1 - height;
         }
         // Never scroll past the last full page.
-        if self.scroll > max_scroll {
-            self.scroll = max_scroll;
+        if scroll > max_scroll {
+            scroll = max_scroll;
         }
-        self.scroll
+        self.scroll.set(scroll);
+        scroll
     }
 
     /// The action the detail overlay would FIRE on Enter (the highlighted verb) +
@@ -353,7 +362,7 @@ impl WorkflowPanel {
 pub fn render(
     frame: &mut Frame,
     area: Rect,
-    panel: &mut WorkflowPanel,
+    panel: &WorkflowPanel,
     snap: &WorkflowSnapshot,
     theme: &Theme,
     lang: Lang,
@@ -432,14 +441,14 @@ fn render_footer(frame: &mut Frame, area: Rect, panel: &WorkflowPanel, theme: &T
 fn render_body(
     frame: &mut Frame,
     area: Rect,
-    panel: &mut WorkflowPanel,
+    panel: &WorkflowPanel,
     snap: &WorkflowSnapshot,
     theme: &Theme,
     lang: Lang,
     now_ms: u64,
 ) {
     if snap.is_empty() {
-        panel.scroll = 0;
+        panel.scroll.set(0);
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -969,7 +978,7 @@ fn _heat_bold_ref(ms: u64) -> bool {
 }
 #[allow(dead_code)]
 fn _gerund_ref(t: u64) -> &'static str {
-    flavor::gerund(t)
+    flavor::gerund(flavor::Lang::En, t)
 }
 
 #[cfg(test)]
@@ -1196,13 +1205,13 @@ mod tests {
     /// last full page.
     #[test]
     fn scroll_to_focus_keeps_focus_visible_and_is_sticky() {
-        let mut panel = WorkflowPanel::new();
+        let panel = WorkflowPanel::new();
         // 100 rows in a 10-row viewport.
         let (total, height) = (100usize, 10usize);
 
         // Focus at the top → no scroll.
         assert_eq!(panel.scroll_to_focus(0, total, height), 0);
-        assert_eq!(panel.scroll, 0);
+        assert_eq!(panel.scroll.get(), 0);
 
         // Focus row 5 still fits in [0,10) → the view does NOT move (sticky).
         assert_eq!(panel.scroll_to_focus(5, total, height), 0);
@@ -1210,7 +1219,7 @@ mod tests {
         // Focus row 12 is below the window → scroll just enough to reveal it
         // (top = 12 + 1 - 10 = 3).
         assert_eq!(panel.scroll_to_focus(12, total, height), 3);
-        assert_eq!(panel.scroll, 3);
+        assert_eq!(panel.scroll.get(), 3);
 
         // Focus row 4 is now ABOVE the window [3,13) → scroll up to it.
         assert_eq!(panel.scroll_to_focus(4, total, height), 3, "row 4 is in [3,13), stays");
@@ -1221,7 +1230,7 @@ mod tests {
 
         // When everything fits, the offset pins to 0.
         assert_eq!(panel.scroll_to_focus(3, 5, 10), 0);
-        assert_eq!(panel.scroll, 0);
+        assert_eq!(panel.scroll.get(), 0);
         // A zero-height viewport degrades to 0 (no panic / no div-by-zero).
         assert_eq!(panel.scroll_to_focus(7, 100, 0), 0);
     }
@@ -1251,7 +1260,7 @@ mod tests {
         panel.open_detail(&snap);
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let backend = TestBackend::new(100, 30);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| render(f, f.area(), &mut panel, &snap, &theme, Lang::En, 100)).unwrap();
@@ -1281,7 +1290,7 @@ mod tests {
     fn renders_both_styles_and_detail() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let theme = Theme::ga_default();
+        let theme = Theme::default_theme();
         let snap = sample_snapshot();
 
         for style in [RenderStyle::BoxTree, RenderStyle::Bullet] {
