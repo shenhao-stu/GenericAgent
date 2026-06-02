@@ -175,8 +175,8 @@ mod tests {
         assert_eq!(alias_label, "alias of");
         assert!(text.contains("alias of"), "aliases are shown with the 'alias of' phrasing");
         assert!(text.contains("/tools"), "the /tools alias is listed (under its primary)");
-        // A removed command never appears in /help.
-        assert!(!text.contains("/mouse"), "the dropped /mouse command is gone from /help");
+        // S1: /mouse is back in the registry as a discoverable App command.
+        assert!(text.contains("/mouse"), "/mouse is present in /help (S1 toggle model)");
     }
 
     /// Q7 — the `/keybindings` overlay paints the chord→action pairs table incl. the

@@ -846,7 +846,7 @@ fn click_expands_and_collapses_tool_result() {
     let before = block_plain(&app, id, &theme);
     assert!(before.contains("╭─"), "the tool box renders: {before:?}");
     assert!(before.lines().any(|l| l.contains("╭─") && l.contains("run")), "tool name on the top border: {before:?}");
-    assert!(before.contains("… +2 more"), "collapsed result has the fold affordance: {before:?}");
+    assert!(before.contains("▸ +2 more"), "collapsed result has the fold affordance: {before:?}");
     assert!(!before.contains("LINE6"), "the overflow line is hidden when collapsed: {before:?}");
 
     // The box is a `Tool` node in the hit table.
@@ -872,7 +872,7 @@ fn click_expands_and_collapses_tool_result() {
     app.toggle_fold(tool);
     app.sync_transcript(80, 40, &theme);
     let recollapsed = block_plain(&app, id, &theme);
-    assert!(recollapsed.contains("… +2 more"), "second toggle re-collapses: {recollapsed:?}");
+    assert!(recollapsed.contains("▸ +2 more"), "second toggle re-collapses: {recollapsed:?}");
     assert!(!recollapsed.contains("LINE6"), "overflow hidden again: {recollapsed:?}");
 }
 
@@ -1217,11 +1217,12 @@ fn headings_render_bold_and_colored_without_hashes_in_styled_frame() {
 fn wheel_scroll_event_moves_viewport_under_default_capture() {
     use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
-    // (1) Capture is ON by default — without this the terminal never sends the wheel
-    // events below, so the whole feature is dead however good `scroll_lines` is.
+    // (1) S1: Capture is OFF by default (NATIVE mode). The wheel works via
+    // EnableAlternateScroll (?1007h → arrow keys) in native mode. The test below
+    // exercises the mouse handler path directly regardless of capture state.
     assert!(
-        AppState::default().mouse_capture,
-        "mouse capture must default ON so crossterm delivers ScrollUp/ScrollDown (the wheel)"
+        !AppState::default().mouse_capture,
+        "mouse capture defaults OFF in native mode (S1 toggle model)"
     );
 
     let mut app = AppState::new();
@@ -1482,4 +1483,116 @@ fn live_command_border_restyles_at_mono_like_shell_bang() {
 
     // The 4 architecture parity invariants stay green with a command border present.
     assert_parity_invariants();
+}
+
+/// S1 HONEST-CHECK B1 — expanded turn has a ▾ header row tagged NodeId::Turn AND
+/// a click on that row re-collapses the turn. Exercises the LIVE/STYLED path:
+/// apply_bridge_event → sync_transcript → node_hit → click_fold_at.
+///
+/// FAILS on old code: FoldSegment::Text has no `turn` field, so no ▾ header is
+/// emitted and no NodeId::Turn entry covers expanded turn rows.
+/// PASSES now: FoldSegment::Text carries `turn: Some(n)`, the renderer emits a
+/// ` ▾ <title>` row tagged NodeId::Turn, and click_fold_at can collapse it.
+#[test]
+fn expanded_turn_has_downward_triangle_header_and_can_be_recollapsed() {
+    let theme = Theme::default_theme();
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+
+    // Two-turn source: turn 1 will be expanded (manually toggled), turn 2 is the last.
+    let src = "Turn 1 ...\n<summary>first task done</summary>\nbody1\nTurn 2 ...\n<summary>in progress</summary>\nbody2";
+    let id = app.alloc_block_id();
+    app.transcript.push(Block::new(id, None, Role::Assistant, src.to_string(), true));
+    app.set_term_size(80, 40);
+    app.sync_transcript(80, 40, &theme);
+
+    // Turn 1 folds by default (it's a completed turn). Expand it.
+    let node1 = NodeId::Turn { block: id, turn: 1 };
+    app.toggle_fold(node1);
+    app.sync_transcript(80, 40, &theme);
+
+    // STYLED projection must contain a ▾ glyph.
+    let plain = block_plain(&app, id, &theme);
+    assert!(plain.contains('▾'), "expanded turn must show a ▾ header row:\n{plain}");
+
+    // The ▾ header row must be tagged NodeId::Turn{turn:1} in the node_hit table.
+    assert!(
+        app.node_hit.iter().any(|(_, n)| *n == node1),
+        "NodeId::Turn{{turn:1}} must be in node_hit for the expanded ▾ header:\n{:?}",
+        app.node_hit
+    );
+
+    // A click on the ▾ header (col 0) must re-collapse turn 1.
+    // Find which screen rows the turn's node_hit spans.
+    let (range, _) = app.node_hit.iter()
+        .find(|(_, n)| *n == node1)
+        .expect("turn 1 in node_hit");
+    let vis_top = app.viewport.visual_top(&app.wrap_cache);
+    // The range is global visual rows; convert the first to a screen row.
+    let screen_row = *range.start() - vis_top;
+    // Simulate a click on that row at col 0 (the ▾ gutter).
+    let area = ratatui::layout::Rect::new(0, 0, 80, 40);
+    let layout = crate::components::cockpit::split_cockpit(&app, area);
+    let transcript_top = layout.transcript.y;
+    let sr = transcript_top + screen_row as u16;
+    let hit = app.click_fold_at(0, sr, transcript_top);
+    assert!(hit, "click on ▾ header must be handled (col 0, row {sr})");
+    // After clicking, turn 1 should be folded again.
+    assert!(app.node_is_folded(node1), "turn 1 must be folded after clicking ▾");
+}
+
+/// S1 HONEST-CHECK B2 — the ▾ collapse affordance row inside an expanded tool box
+/// is clickable at col 2 (interior of `│ … │`), which was OUTSIDE the old
+/// FOLD_HIT_COLS=2 gate. With the S1 Fix C (full-width zone for NodeId::Tool) this
+/// now correctly collapses the tool.
+///
+/// FAILS on old code: `transcript_node_at(2, ...)` returns None because col 2 >= FOLD_HIT_COLS.
+/// PASSES now: NodeId::Tool uses full-width hit zone (u16::MAX).
+#[test]
+fn expanded_tool_box_affordance_row_is_clickable_at_interior_col() {
+    let theme = Theme::default_theme();
+    let mut app = AppState::new();
+    app.conn = ConnStatus::Connected { model: Some("m".into()) };
+
+    // A source with enough result lines to be foldable (>4 lines).
+    let src = "Turn 1 ...\n\u{1F6E0}\u{FE0F} run({\"cmd\": \"ls\"})\nLINE1\nLINE2\nLINE3\nLINE4\nLINE5\nLINE6";
+    let id = app.alloc_block_id();
+    app.transcript.push(Block::new(id, None, Role::Assistant, src.to_string(), true));
+    app.set_term_size(80, 40);
+    app.sync_transcript(80, 40, &theme);
+
+    // Expand the tool result.
+    let tool = NodeId::Tool { block: id, tool: 0 };
+    app.toggle_fold(tool);
+    assert_eq!(app.folds.get(&tool), Some(&true), "tool result expanded");
+    app.sync_transcript(80, 40, &theme);
+
+    // The tool must be in the node_hit table.
+    assert!(
+        app.node_hit.iter().any(|(_, n)| *n == tool),
+        "tool must be in node_hit after expanding"
+    );
+
+    // Find the screen row of the LAST row of the tool's hit range (the ▾ affordance
+    // is the last interior row, just before the bottom border).
+    let (range, _) = app.node_hit.iter().find(|(_, n)| *n == tool).expect("tool in node_hit");
+    let vis_top = app.viewport.visual_top(&app.wrap_cache);
+    let last_vis = *range.end();
+    let screen_row_offset = last_vis - vis_top;
+    let area = ratatui::layout::Rect::new(0, 0, 80, 40);
+    let layout = crate::components::cockpit::split_cockpit(&app, area);
+    let transcript_top = layout.transcript.y;
+    let screen_row = transcript_top + screen_row_offset as u16;
+
+    // Click at col 2 (inside the │ border, the ▾ affordance position).
+    // With old code this returns None (col 2 >= FOLD_HIT_COLS=2).
+    let node_hit = app.transcript_node_at(2, screen_row, transcript_top);
+    assert!(
+        node_hit.is_some(),
+        "col 2 must hit a Tool node (full-width zone for NodeId::Tool, S1 Fix C)"
+    );
+    let handled = app.click_fold_at(2, screen_row, transcript_top);
+    assert!(handled, "col 2 click on affordance row must be handled");
+    // After the click the tool should be collapsed again.
+    assert!(!app.folds.get(&tool).copied().unwrap_or(false), "tool must be collapsed after click at col 2");
 }

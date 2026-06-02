@@ -178,7 +178,29 @@ pub fn render_assistant_cockpit_full(
                     Some(NodeId::Turn { block: folds.block_id, turn: *turn }),
                 ));
             }
-            FoldSegment::Text { body } => {
+            FoldSegment::Text { body, turn: seg_turn } => {
+                // S1 Fix B: for an EXPANDED non-preamble turn, emit a ` ▾ <title>`
+                // header row BEFORE the body — tagged NodeId::Turn so clicking it
+                // collapses the turn back. The preamble (turn=None) gets no header
+                // because it has no associated turn number to collapse.
+                if let Some(tn) = seg_turn {
+                    let title = crate::render::fold::turn_title_pub(body);
+                    logical.push((
+                        Line::from(vec![
+                            Span::styled(
+                                " ▾ ",
+                                Style::default().fg(theme.color(crate::theme::Token::Claude)),
+                            ),
+                            Span::styled(
+                                fold_header_title(&title, width),
+                                Style::default()
+                                    .fg(theme.color(crate::theme::Token::Dim))
+                                    .add_modifier(Modifier::ITALIC),
+                            ),
+                        ]),
+                        Some(NodeId::Turn { block: folds.block_id, turn: *tn }),
+                    ));
+                }
                 render_turn_body(body, theme, width, folds, &mut tool_idx, &mut logical);
             }
         }
@@ -471,7 +493,8 @@ fn interior_spans(row: &str, theme: &Theme) -> Vec<Span<'static>> {
     let trimmed = middle.trim_start();
     let tok = if trimmed.starts_with("!!!Error") {
         Token::Error
-    } else if trimmed.starts_with("… +") || trimmed.starts_with('▾') {
+    } else if trimmed.starts_with("… +") || trimmed.starts_with('▸') || trimmed.starts_with('▾') {
+        // S1: affordance rows use ▸/▾ — both get the Suggestion color.
         Token::Suggestion
     } else {
         Token::Dim
@@ -1626,5 +1649,108 @@ done.";
                 }
             }
         }
+    }
+
+    /// RECON R5 blank-gap: reproduce blank rows on the live/styled path.
+    #[test]
+    fn recon_r5_blank_gap_probe() {
+        use crate::app::{AppState, ConnStatus};
+        use crate::components::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (w, h) = (80u16, 40u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let theme = Theme::default_theme();
+        let mut app = AppState::new();
+        app.conn = ConnStatus::Connected { model: Some("gpt-5".into()) };
+
+        // Build a multi-block transcript: assistant with tool box, user input, notices
+        // This matches the scenario from clip_20260602_221101 and clip_20260602_220538.
+        // Push an assistant block with multiple turns + tool calls
+        // This better matches the screenshots showing large blank regions
+        {
+            use crate::bridge::BridgeEvent;
+            use crate::bridge::CoreToUi;
+            let ev = BridgeEvent::Frame(CoreToUi::MessageBegin { mid: "m1".into(), role: "assistant".into() });
+            app.apply_bridge_event(ev, 0);
+            // Longer message with multiple turns and tool calls
+            let long_text = concat!(
+                "Turn 1 ...\n",
+                "<summary>Scanning tabs for available pages</summary>\n",
+                "🛠️ web_scan({\"tabs_only\": true})\n",
+                "[Info] 3 tabs scanned · ok\n",
+                "Turn 2 ...\n",
+                "<summary>Reading the config file</summary>\n",
+                "🛠️ file_read({\"path\": \"/d/GenericAgent/config.toml\"})\n",
+                "[Info] file contents loaded\n",
+                "Turn 3 ...\n",
+                "<summary>Running build command</summary>\n",
+                "🛠️ code_run({\"script\": \"cargo build\"})\n",
+                "[Info] build succeeded\n",
+            );
+            let ev2 = BridgeEvent::Frame(CoreToUi::MessageDelta { mid: "m1".into(), text: long_text.into() });
+            app.apply_bridge_event(ev2, 0);
+            let ev3 = BridgeEvent::Frame(CoreToUi::MessageEnd { mid: "m1".into(), reason: "stop".into() });
+            app.apply_bridge_event(ev3, 0);
+        }
+
+        // Push user input
+        app.push_user("hi".into());
+
+        // Push two system notices
+        app.push_notice("• 已中止运行中的任务".into());
+        app.push_notice("• 样式已更新".into());
+
+        app.prepare_frame(ratatui::layout::Rect::new(0, 0, w, h), &theme);
+
+        // Debug: print the wrap cache total visual lines
+        println!("=== Wrap cache total lines: {} ===", app.wrap_cache.total_visual_lines());
+
+        // Debug: print actual render lines per transcript block
+        for (bi, block) in app.transcript.iter().enumerate() {
+            let folds = crate::render::fold::BlockFolds { block_id: block.id, fold_all: app.fold_all, overrides: Some(&app.folds) };
+            let rb = block.to_render_block(&theme, &folds, 80);
+            println!("  block {}: id={} role={:?} lines={}", bi, block.id, rb.role, app.wrap_cache.block_line_count(block.id));
+        }
+
+        term.draw(|f| render(f, &app, &theme, 0)).unwrap();
+
+        let buf = term.backend().buffer();
+
+        // Print the transcript region rows
+        println!("=== Full frame ({}x{}) ===", w, h);
+        for y in 0..h as usize {
+            let mut row = String::new();
+            for x in 0..w as usize {
+                row.push_str(buf.content()[y * w as usize + x].symbol());
+            }
+            let blank = row.trim().is_empty();
+            println!("  row {:2}: [{}] {:?}", y, if blank { "BLANK" } else { "     " }, row.trim_end());
+        }
+
+        // Find blank runs
+        let mut max_consec_blank = 0usize;
+        let mut consec = 0usize;
+        let mut blank_runs: Vec<(usize, usize)> = Vec::new();
+        let mut run_start = 0usize;
+        // Only check transcript rows (not header/footer - approx rows 2..h-4)
+        for y in 2..(h as usize).saturating_sub(4) {
+            let row: String = (0..w as usize).map(|x| {
+                buf.content()[y * w as usize + x].symbol().chars().next().unwrap_or(' ')
+            }).collect();
+            if row.trim().is_empty() {
+                if consec == 0 { run_start = y; }
+                consec += 1;
+                if consec > max_consec_blank { max_consec_blank = consec; }
+            } else {
+                if consec > 0 { blank_runs.push((run_start, consec)); }
+                consec = 0;
+            }
+        }
+        if consec > 0 { blank_runs.push((run_start, consec)); }
+        println!("\nBlank runs in transcript region rows 2..{}: {:?}", (h as usize).saturating_sub(4), blank_runs);
+        let _ = (max_consec_blank, blank_runs);
+        // RECON ONLY — no assert here; we collected the evidence above.
     }
 }

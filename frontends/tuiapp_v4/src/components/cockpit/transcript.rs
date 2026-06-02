@@ -104,7 +104,27 @@ pub(crate) fn render_transcript(frame: &mut Frame, area: Rect, app: &AppState, t
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), area);
+    // SLICE S2 — bottom-anchor: when following AND total visual lines < area height,
+    // render into a sub-rect that starts below the blank gap so the last content row
+    // sits flush against the spinner/footer.  In scroll-up (anchored) mode the window
+    // already fills a full screenful, so no offset is needed.  The DRAW rect shrinks
+    // but prepare_frame/split_cockpit/sync geometry use the full `area` unchanged.
+    let render_area = {
+        let total = app.wrap_cache.total_visual_lines();
+        let h = area.height as usize;
+        if app.following() && total < h {
+            let gap = (h - total) as u16;
+            Rect {
+                y: area.y + gap,
+                height: area.height.saturating_sub(gap),
+                ..area
+            }
+        } else {
+            area
+        }
+    };
+
+    frame.render_widget(Paragraph::new(lines), render_area);
 }
 
 /// Build one full-width USER band row (Q1): the row `text` (one soft-wrapped
@@ -130,6 +150,31 @@ pub(crate) fn user_band_line<'a>(text: &str, width: u16, theme: &Theme) -> Line<
         Span::styled(body, band),
         Span::styled(" ".repeat(pad), band),
     ])
+}
+
+/// STICKY HEADER (R6 Part A): a pinned 1-row breadcrumb at the TOP of the transcript
+/// while scrolled away from the tail — `↑ <first line of the last user prompt…>` on
+/// the `UserBand` charcoal bg, DIM fg (so it reads as chrome, not a live message),
+/// clipped + width-padded edge-to-edge. The caller only invokes this when
+/// `!app.following()` AND a user prompt exists (so the row never appears at the tail).
+pub(crate) fn render_sticky_header(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
+    let Some(text) = app.last_user_source_first_line() else {
+        return;
+    };
+    let band = Style::default()
+        .bg(theme.color(Token::UserBand))
+        .fg(theme.color(Token::Dim));
+    let w = area.width as usize;
+    let prefix = "↑ ";
+    let body = clip_to(text, w.saturating_sub(2));
+    let used = 2 + unicode_width::UnicodeWidthStr::width(body.as_str());
+    let pad = w.saturating_sub(used);
+    let line = Line::from(vec![
+        Span::styled(prefix.to_string(), band),
+        Span::styled(body, band),
+        Span::styled(" ".repeat(pad), band),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// The speaker gutter glyph + accent token + body token for a role.
@@ -222,5 +267,147 @@ mod tests {
                 cell.bg
             );
         }
+    }
+
+    /// SLICE S2 HONEST-CHECK — blank_gap_bottom_anchor_live_path.
+    ///
+    /// Builds a styled TestBackend frame at 80×40 with a transcript shorter than the
+    /// viewport (a few assistant turns + user message + 2 notices = ~12 visual lines in
+    /// a 25-row transcript rect).  After the fix the spinner must immediately follow the
+    /// last content row (gap == 0).  FAILS before the fix (gap ≈ 13).  PASSES after.
+    ///
+    /// Also asserts the tool box ╰─╯ bottom border is present (the "visually not
+    /// closing" appearance is caused by the large blank gap making the box look far
+    /// from subsequent content — an optical illusion, not a missing border).
+    #[test]
+    fn blank_gap_bottom_anchor_live_path() {
+        use crate::app::{AppState, ConnStatus};
+        use crate::bridge::{BridgeEvent, CoreToUi};
+        use crate::components::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (w, h) = (80u16, 40u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let theme = Theme::default_theme();
+        let mut app = AppState::new();
+        app.conn = ConnStatus::Connected { model: Some("gpt-5".into()) };
+
+        // Short transcript: a few assistant turns + user + 2 notices.
+        let ev = BridgeEvent::Frame(CoreToUi::MessageBegin {
+            mid: "m1".into(),
+            role: "assistant".into(),
+        });
+        app.apply_bridge_event(ev, 0);
+        // Simplified text that will produce a modest number of visual lines.
+        let text = "Let me check something.\n\u{1F6E0}\u{FE0F} code_run({\"script\": \"cargo build\"})\n[Info] build succeeded\nDone.";
+        let ev2 = BridgeEvent::Frame(CoreToUi::MessageDelta {
+            mid: "m1".into(),
+            text: text.into(),
+        });
+        app.apply_bridge_event(ev2, 0);
+        let ev3 = BridgeEvent::Frame(CoreToUi::MessageEnd {
+            mid: "m1".into(),
+            reason: "stop".into(),
+        });
+        app.apply_bridge_event(ev3, 0);
+        app.push_user("hi".into());
+        app.push_notice("已中止运行中的任务".into());
+        app.push_notice("样式已更新".into());
+
+        // Render via the LIVE path: prepare_frame then draw.
+        app.prepare_frame(ratatui::layout::Rect::new(0, 0, w, h), &theme);
+        term.draw(|f| render(f, &app, &theme, 0)).unwrap();
+        let buf = term.backend().buffer();
+
+        // Scan all rows — classify as spinner, content, or blank.
+        let mut spinner_row: Option<usize> = None;
+        let mut last_content_row: Option<usize> = None;
+        for y in 0..h as usize {
+            let row: String = (0..w as usize)
+                .map(|x| buf.content()[y * w as usize + x].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if row.contains('⠿') || row.contains("Pondering") || row.contains("for 0s") {
+                spinner_row = Some(y);
+            } else if !row.trim().is_empty() {
+                last_content_row = Some(y);
+            }
+        }
+
+        // The spinner row and a last-content row must both be present.
+        let spin_y = spinner_row.expect("spinner row must be rendered");
+        let content_y = last_content_row.expect("at least one content row must be rendered");
+
+        // AFTER the fix: the spinner immediately follows the last content row.
+        // BEFORE the fix: there are 10+ blank rows between content and spinner.
+        let gap = spin_y.saturating_sub(content_y + 1);
+        assert_eq!(
+            gap,
+            0,
+            "blank rows between last content (row {content_y}) and spinner (row {spin_y}): \
+             {gap} blank rows — bottom-anchor fix must eliminate the gap"
+        );
+
+        // The tool box ╰─╯ bottom border must be visible (not cut off by viewport).
+        let has_bottom_border = (0..h as usize).any(|y| {
+            let row: String = (0..w as usize)
+                .map(|x| buf.content()[y * w as usize + x].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row.contains('╰') && row.contains('╯')
+        });
+        assert!(
+            has_bottom_border,
+            "tool box bottom border ╰─╯ must be visible in the transcript"
+        );
+    }
+
+    /// SLICE S6 HONEST-CHECK (R6 Part A): the sticky last-user-prompt breadcrumb is
+    /// pinned at the TOP of the transcript ONLY while scrolled away from the tail.
+    /// Following → absent; scrolled up → `↑ <prompt>` present. LIVE styled path.
+    #[test]
+    fn sticky_header_shows_when_scrolled_up_absent_when_following() {
+        use crate::app::{AppState, ConnStatus};
+        use crate::components::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (w, h) = (60u16, 24u16);
+        let theme = Theme::default_theme();
+        let area = ratatui::layout::Rect::new(0, 0, w, h);
+        let mut app = AppState::new();
+        app.conn = ConnStatus::Connected { model: Some("m".into()) };
+        app.push_user("what is the meaning of life?".into());
+        // Overflow the viewport so we can scroll up off the tail.
+        for i in 0..40 {
+            app.push_notice(format!("assistant detail line {i}"));
+        }
+
+        let frame_text = |app: &AppState| -> String {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| render(f, app, &theme, 0)).unwrap();
+            let buf = term.backend().buffer();
+            (0..h as usize)
+                .map(|y| (0..w as usize).map(|x| buf.content()[y * w as usize + x].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // FOLLOWING (at the tail): NO sticky breadcrumb (the spinner/done-line are not
+        // shown here either, so `↑` is unique to the sticky row).
+        app.prepare_frame(area, &theme);
+        assert!(app.following(), "precondition: at the tail");
+        let screen = frame_text(&app);
+        assert!(!screen.contains('↑'), "no sticky `↑` breadcrumb while following:\n{screen}");
+
+        // SCROLL UP: the sticky breadcrumb appears carrying the last user prompt.
+        app.scroll_lines(-8);
+        assert!(!app.following(), "precondition: scrolled away from the tail");
+        app.prepare_frame(area, &theme);
+        let screen2 = frame_text(&app);
+        assert!(screen2.contains('↑'), "sticky `↑` breadcrumb appears when scrolled up:\n{screen2}");
+        assert!(
+            screen2.contains("what is the meaning of life"),
+            "the sticky row shows the last user prompt:\n{screen2}"
+        );
     }
 }

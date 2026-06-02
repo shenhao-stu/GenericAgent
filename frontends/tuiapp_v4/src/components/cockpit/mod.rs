@@ -7,12 +7,12 @@
 //!   SEPARATOR (1)   ▓▓▓ rainbow 7-stop, full width ▓▓▓
 //!   TRANSCRIPT (Min 0 — FLEXES to fill all remaining height)
 //!   SPINNER (1, only when busy)  ⠙ <Gerund>… (3.2s · ↓ 1.6k · thinking max effort)
-//!   SPINNER-TIP (1, only when busy)  ⎿ <rotating tip>   (corner-continuation)
+//!   SPINNER-TIP (1, only when busy)  └ <rotating tip>   (corner-continuation)
 //!     ─ or, when idle right after a turn ─
 //!   DONE-LINE (1)   ⠿ <Gerund> for <dur> · ↑ <in> · ↓ <out>   (frozen)
 //!   COMPOSER (flex 1..8, bordered, multi-line; hot-pink border in shell mode)
 //!   ROW1 (1)        <llm> · <model> · <effort> · <ctx> · <branch>  [conn chip]
-//!   ROW2 (1, idle only)  ⎿ <rotating tip>   (moves UNDER the spinner when busy)
+//!   ROW2 (1, idle only)  └ <rotating tip>   (moves UNDER the spinner when busy)
 //!
 //! The transcript uses `Constraint::Min(0)` so it fills. Assistant blocks are
 //! rendered through the COCKPIT markdown layer (per-turn folds → `▸ summary`,
@@ -40,7 +40,7 @@ use footer::{
     render_done_line, render_separator, render_session_info, render_spinner, render_tips,
 };
 use header::{render_header, HEADER_ROWS};
-use transcript::render_transcript;
+use transcript::{render_sticky_header, render_transcript};
 
 /// Max composer height (rows) before it stops growing and scrolls internally.
 const COMPOSER_MAX_ROWS: u16 = 8;
@@ -80,10 +80,14 @@ pub fn render(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64) {
 pub(crate) struct CockpitLayout {
     pub header: Rect,
     pub sep: Rect,
+    /// `Some` only when scrolled away from the tail (`!following`) AND a user prompt
+    /// exists: a 1-row dim breadcrumb pinned ABOVE the transcript showing the most
+    /// recent user prompt (R6 Part A). `None` at the live tail (no pinned row).
+    pub sticky_header: Option<Rect>,
     pub transcript: Rect,
     /// `Some` only when the spinner band is shown (`app.busy`).
     pub spinner: Option<Rect>,
-    /// `Some` only when the spinner is shown: the `⎿ Tip` row DIRECTLY UNDER the
+    /// `Some` only when the spinner is shown: the `└ Tip` row DIRECTLY UNDER the
     /// spinner status line (above the composer), so the corner reads as a
     /// continuation of the status line (Slice 5 / R4 item 5). Mirrors the
     /// `spinner` Option wiring.
@@ -97,7 +101,7 @@ pub(crate) struct CockpitLayout {
     pub composer: Rect,
     /// ROW 1 below the composer: runtime session info (Q7) — always present.
     pub info: Rect,
-    /// ROW 2 below the composer: `⎿ Tips`. `Some` only when IDLE; while busy the
+    /// ROW 2 below the composer: `└ Tips`. `Some` only when IDLE; while busy the
     /// Tip moves to `spinner_tip` (under the spinner) and this slot is gone, so
     /// the sole below-composer row is `info`.
     pub tips: Option<Rect>,
@@ -116,8 +120,11 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     // idle AND a turn has run (Q7). Busy XOR done — they never both show.
     let show_done = !show_spinner && app.last_turn_ms.is_some();
     let dropdown_rows = dropdown_height(app, area.width);
+    // R6 Part A: while scrolled UP (not following the tail) AND a user prompt exists,
+    // pin a 1-row breadcrumb of the last user prompt at the TOP of the transcript.
+    let show_sticky = !app.following() && app.last_user_source_first_line().is_some();
 
-    // §5 vertical split. Transcript = Min(0) so it flexes to fill. The `⎿ Tip`
+    // §5 vertical split. Transcript = Min(0) so it flexes to fill. The `└ Tip`
     // travels with the spinner state (Slice 5): while BUSY it sits as a
     // corner-continuation row right under the spinner status line (above the
     // composer), and the sole below-composer row is row1 session info. While IDLE
@@ -125,11 +132,14 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(HEADER_ROWS), // header (multi-row rounded box, Slice 2)
         Constraint::Length(1),           // rainbow separator
-        Constraint::Min(0),              // transcript (FLEX, shrinks for the taller header)
     ];
+    if show_sticky {
+        constraints.push(Constraint::Length(1)); // sticky last-user breadcrumb (R6 Part A)
+    }
+    constraints.push(Constraint::Min(0)); // transcript (FLEX, shrinks for the taller header)
     if show_spinner {
         constraints.push(Constraint::Length(1)); // spinner status line
-        constraints.push(Constraint::Length(1)); // ⎿ tip (under the spinner)
+        constraints.push(Constraint::Length(1)); // └ tip (under the spinner)
     } else if show_done {
         constraints.push(Constraint::Length(1)); // frozen done-line
     }
@@ -139,7 +149,7 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     constraints.push(Constraint::Length(composer_rows)); // composer (bordered)
     constraints.push(Constraint::Length(1)); // row1: runtime session info
     if !show_spinner {
-        constraints.push(Constraint::Length(1)); // row2: ⎿ Tips (idle only)
+        constraints.push(Constraint::Length(1)); // row2: └ Tips (idle only)
     }
 
     let chunks = Layout::default()
@@ -156,6 +166,7 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     };
     let header = next();
     let sep = next();
+    let sticky_header = show_sticky.then(&mut next);
     let transcript = next();
     let spinner = show_spinner.then(&mut next);
     let spinner_tip = show_spinner.then(&mut next);
@@ -168,6 +179,7 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     CockpitLayout {
         header,
         sep,
+        sticky_header,
         transcript,
         spinner,
         spinner_tip,
@@ -189,6 +201,7 @@ fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64)
     let CockpitLayout {
         header,
         sep,
+        sticky_header,
         transcript,
         spinner,
         spinner_tip,
@@ -201,6 +214,11 @@ fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64)
 
     render_header(frame, header, app, theme, now_ms);
     render_separator(frame, sep, app, theme);
+    // R6 Part A: the pinned last-user-prompt breadcrumb sits at the TOP of the
+    // transcript region while scrolled up (Some only when !following + a prompt exists).
+    if let Some(sh) = sticky_header {
+        render_sticky_header(frame, sh, app, theme);
+    }
     render_transcript(frame, transcript, app, theme);
     // Effects are now BORDER-BOUND (a flowing-rainbow composer border + a few
     // drifting particles), NOT a full-background fire/snow over the transcript —
@@ -209,7 +227,7 @@ fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64)
     if let Some(spin) = spinner {
         render_spinner(frame, spin, app, theme, now_ms);
     }
-    // The `⎿ Tip` hangs as a corner-continuation directly under the spinner status
+    // The `└ Tip` hangs as a corner-continuation directly under the spinner status
     // line while busy (Slice 5) — drawn here, right after the spinner.
     if let Some(tip) = spinner_tip {
         render_tips(frame, tip, app, theme, now_ms);
@@ -230,7 +248,7 @@ fn render_cockpit(frame: &mut Frame, app: &AppState, theme: &Theme, now_ms: u64)
         super::effects_paint::draw_composer_border_fx(frame, app, composer, now_ms, cmd);
     }
     render_session_info(frame, info, app, theme);
-    // The below-composer `⎿ Tip` row exists only when IDLE; while busy the Tip has
+    // The below-composer `└ Tip` row exists only when IDLE; while busy the Tip has
     // moved up under the spinner (`spinner_tip`) and `info` is the sole row here.
     if let Some(tip) = tips {
         render_tips(frame, tip, app, theme, now_ms);

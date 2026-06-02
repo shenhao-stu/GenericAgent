@@ -90,13 +90,13 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd("restore", "restore last model_responses into history", App),
     cmd("reload-keys", "hot-reload mykey.py", App),
     cmd("language", "switch interface language + repaint", Ui),
-    cmd("pets", "pet style", Ui),
-    alias("emoji", "pet style", Ui, "pets"),
+    cmd("emoji", "spinner or pet companion style", Ui),
     cmd("effort", "reasoning-effort slider (low…max)", Ui),
     cmd("verbose", "full-screen tool-call audit", Ui),
     alias("tools", "full-screen tool-call audit", Ui, "verbose"),
     alias("trace", "full-screen tool-call audit", Ui, "verbose"),
     cmd("fold", "fold / unfold all completed tool chips", App),
+    cmd("mouse", "toggle mouse mode (native select ↔ interactive click)", App),
     cmd("theme", "theme picker with live preview", Ui),
     cmd("quit", "quit tui_v4", App),
     alias("exit", "quit tui_v4", App, "quit"),
@@ -323,8 +323,8 @@ mod tests {
             "help", "keybindings", "status", "sessions", "new", "switch", "close", "rename", "branch",
             "rewind", "clear", "stop", "abort", "llm", "btw", "review", "update", "autorun",
             "morphling", "goal", "hive", "conductor", "workflows", "scheduler", "continue", "resume",
-            "cost", "export", "restore", "reload-keys", "language", "pets", "emoji", "effort", "verbose",
-            "tools", "trace", "fold", "theme", "quit", "exit",
+            "cost", "export", "restore", "reload-keys", "language", "emoji", "effort", "verbose",
+            "tools", "trace", "fold", "mouse", "theme", "quit", "exit",
         ];
         for name in all {
             let c = resolve(name).unwrap_or_else(|| panic!("/{name} must resolve"));
@@ -335,8 +335,8 @@ mod tests {
             // Resolution survives glued-on args (the dispatcher may pass the head).
             assert!(resolve(&format!("{name} some args")).is_some(), "/{name} resolves with args");
         }
-        // The §4 spec says ~33; the union with the 6 marked aliases is 41 (`/effects`
-        // was removed in Slice 7 — its effects ENGINE stays, the COMMAND is gone).
+        // The §4 spec says ~33; the union with the 6 marked aliases is 42 (S1 added
+        // /mouse back as a discoverable App command).
         assert_eq!(COMMANDS.len(), all.len());
         assert!(COMMANDS.len() >= 33, "expected ~33+ commands, got {}", COMMANDS.len());
 
@@ -370,13 +370,13 @@ mod tests {
     /// resolution of the C3-dedup / C5-D7 specs.
     #[test]
     fn aliases_marked_not_duplicated() {
-        // Exactly these aliases, each pointing at its primary (`/emoji`→`/pets`, Slice 6).
+        // Exactly these aliases, each pointing at its primary. (`/emoji` became a
+        // PRIMARY command in round-5 — `/pets` was removed — so it is NOT listed here.)
         let expected = [
             ("sessions", "status"),
             ("abort", "stop"),
             ("tools", "verbose"),
             ("trace", "verbose"),
-            ("emoji", "pets"),
             ("exit", "quit"),
         ];
         for (a, primary) in expected {
@@ -416,17 +416,18 @@ mod tests {
         assert!(alias_only.iter().any(|c| c.name == "abort"), "/abort still completes alone");
     }
 
-    /// Q10 — `/mouse` was removed from the registry; the `Ctrl+Shift+M` chord is the
-    /// live capture toggle (capture defaults ON for wheel scroll → the chord is the
-    /// opt-OUT into native drag-select). `/mouse` must NOT resolve or surface in the
-    /// palette.
+    /// S1 — `/mouse` is back in the registry as an App command so it's discoverable
+    /// in the palette. It toggles between native mode (drag-to-copy) and interactive
+    /// mode (click ▸/▾ fold). The Ctrl+Shift+M chord still works in parallel.
     #[test]
-    fn mouse_command_removed() {
-        assert!(resolve("mouse").is_none(), "/mouse is no longer a command");
-        assert!(!COMMANDS.iter().any(|c| c.name == "mouse"), "/mouse is gone from COMMANDS");
+    fn mouse_command_present() {
+        let cmd = resolve("mouse").expect("/mouse must be in the registry (S1)");
+        assert_eq!(cmd.name, "mouse");
+        assert_eq!(cmd.kind, CommandKind::App, "/mouse is an App command");
+        assert!(COMMANDS.iter().any(|c| c.name == "mouse"), "/mouse is in COMMANDS");
         assert!(
-            !palette_matches("/mouse").iter().any(|c| c.name == "mouse"),
-            "/mouse does not surface in the palette"
+            palette_matches("/mouse").iter().any(|c| c.name == "mouse"),
+            "/mouse surfaces in the palette"
         );
     }
 

@@ -291,14 +291,15 @@ pub fn render_chip_box(call: &ToolCall, width: u16, max_preview: usize, expanded
     let (mut preview, overflow) = result_preview(&call.result, max_preview, content_w, expanded);
     body.append(&mut preview);
 
-    // The expand/collapse affordance row, INSIDE the box (Fix E). Shown only when
-    // the result actually overflows `max_preview`.
+    // The expand/collapse affordance row, INSIDE the box (Fix E / S1 Fix C).
+    // Shown only when the result overflows `max_preview`. Clearer affordance
+    // text (S1): collapsed = "▸ +N more", expanded = "▾ collapse".
     let expandable = overflow > 0;
     if expandable {
         body.push(if expanded {
-            "▾".to_string()
+            "▾ collapse".to_string()
         } else {
-            format!("… +{overflow} more")
+            format!("▸ +{overflow} more")
         });
     }
 
@@ -812,11 +813,12 @@ host = localhost";
             status: ToolStatus::Ok,
         };
         let chip = render_chip_box(&call, 30, 3, false);
-        // 10 content lines, max 3 preview → the last interior row is a `… +7 more`
-        // fold affordance, INSIDE the box (between the borders).
+        // 10 content lines, max 3 preview → the last interior row is a `▸ +7 more`
+        // fold affordance, INSIDE the box (between the borders). S1: affordance
+        // text changed from `… +N more` to `▸ +N more` for clearer discoverability.
         assert!(chip.expandable, "an overflowing result is foldable");
         let last = chip.interior.last().unwrap();
-        assert!(last.contains("… +7 more"), "fold affordance inside the box: {last:?}");
+        assert!(last.contains("▸ +7 more"), "fold affordance inside the box: {last:?}");
         // line 0..2 are shown; line 9 (past the preview) is hidden when collapsed.
         assert!(chip.interior.iter().any(|r| r.contains("line 0")));
         assert!(!chip.interior.iter().any(|r| r.contains("line 9")), "overflow line hidden: {:?}", chip.interior);

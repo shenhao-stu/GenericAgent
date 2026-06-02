@@ -288,6 +288,17 @@ pub(crate) fn app_command(app: &mut AppState, name: &str, args: &str) {
             // Ctrl+Shift+O chord (Ctrl+O is now the clean-copy chord, Q2).
             app.toggle_fold_all();
         }
+        "mouse" => {
+            // S1 toggle: flip native ↔ interactive mouse mode.
+            let on = !app.mouse_capture;
+            app.emit(AppEvent::SetMouseCapture(on));
+            let notice = if on {
+                "mouse: click (expand/collapse ▸/▾)"
+            } else {
+                "mouse: select (drag to copy)"
+            };
+            app.push_notice(notice.to_string());
+        }
         "new" => {
             let seed = args.trim();
             input::keymap::cockpit_new_session(app);
@@ -524,32 +535,55 @@ pub(crate) fn strip_theme_label(label: &str) -> String {
     label.trim().to_string()
 }
 
-/// Apply a `/pets` picker choice by its row id (pet ids 0..=4, Off = 5).
+/// Apply an `/emoji` picker choice by row id: spinner glyphs (braille/arc/pulse at
+/// ids 100/101/102) OR pet faces (bear/cat/dot/unicode/fox at ids 0..=4, Off = 5).
+/// ONE mutually-exclusive companion — drives the spinner lead AND the animated tab.
 pub(crate) fn apply_emoji_choice(app: &mut AppState, id: usize) {
-    use flavor::PetStyle;
-    if id < 5 {
-        app.pet_style = PetStyle::all()[id];
-    } else if id == 5 {
-        app.pet_style = PetStyle::Off;
-    }
+    use flavor::{CompanionKind, PetStyle, SpinnerStyle};
+    app.companion = match id {
+        100 => CompanionKind::Spinner(SpinnerStyle::Braille),
+        101 => CompanionKind::Spinner(SpinnerStyle::Arc),
+        102 => CompanionKind::Spinner(SpinnerStyle::Pulse),
+        0..=4 => CompanionKind::Pet(PetStyle::all()[id]),
+        5 => CompanionKind::Pet(PetStyle::Off),
+        _ => return,
+    };
 }
 
-/// Build the `/pets` picker rows: the 5 pet styles + Off (ids 0..=5), each marked
-/// current if active. Spinner style is no longer offered here (Slice 6). PURE-ish.
+/// Build the `/emoji` picker rows: 3 spinner glyphs (braille/arc/pulse, ids
+/// 100..=102, braille first/default) + 5 pet faces (bear/cat/dot/unicode/fox, ids
+/// 0..=4) + Off (id 5). ONE mutually-exclusive companion; each row marks `current`
+/// against `app.companion`. PURE-ish.
 pub(crate) fn emoji_picker_items(app: &AppState) -> Vec<components::picker::PickItem> {
     use components::picker::PickItem;
-    use flavor::PetStyle;
+    use flavor::{CompanionKind, PetStyle, SpinnerStyle};
+    let spin = i18n::t(app.lang, "emoji.spinner");
     let pet = i18n::t(app.lang, "emoji.pet");
     let off = i18n::t(app.lang, "emoji.off");
     let mut items: Vec<PickItem> = Vec::new();
+    // Spinner glyphs first (braille is the default companion).
+    for (i, style) in [SpinnerStyle::Braille, SpinnerStyle::Arc, SpinnerStyle::Pulse]
+        .iter()
+        .enumerate()
+    {
+        items.push(
+            PickItem::new(100 + i, format!("{spin} · {}", style.name()))
+                .with_detail(style.glyph(0).to_string())
+                .current(app.companion == CompanionKind::Spinner(*style)),
+        );
+    }
+    // Pet faces.
     for (i, style) in PetStyle::all().iter().enumerate() {
         items.push(
             PickItem::new(i, format!("{pet} · {}", style.name()))
                 .with_detail(flavor::pet_face(*style, 0, 0).to_string())
-                .current(*style == app.pet_style),
+                .current(app.companion == CompanionKind::Pet(*style)),
         );
     }
-    items.push(PickItem::new(5, format!("{pet} · {off}")).current(app.pet_style == PetStyle::Off));
+    items.push(
+        PickItem::new(5, format!("{pet} · {off}"))
+            .current(app.companion == CompanionKind::Pet(PetStyle::Off)),
+    );
     items
 }
 
@@ -621,45 +655,64 @@ mod tests {
     use crate::bridge::protocol::CoreToUi;
     use crate::bridge::BridgeEvent;
 
-    /// Slice 6 HONEST CHECK: built on a LIVE `AppState`, the `/pets` (alias `/emoji`)
-    /// picker is pet styles + Off ONLY — ZERO spinner rows (no id ≥ 100, no
-    /// arc/braille/pulse/spinner label); the pet defaults to Bear; and the dynamic
-    /// `terminal_title()` carries the bear face + the active session name +
-    /// "GenericAgent", never "NativeClaude".
+    /// ROUND-5 HONEST CHECK: the UNIFIED `/emoji` companion picker (spinner ⊕ pet,
+    /// pick-one) + the animated tab title. `/pets` is GONE; `/emoji` is the PRIMARY
+    /// command; the picker offers 3 spinner glyphs (ids 100..=102) + 5 pet faces
+    /// (0..=4) + Off (5); a pet selection drives `companion`; and `terminal_title()`
+    /// ANIMATES across ticks (never "NativeClaude").
     #[test]
-    fn pets_picker_has_zero_spinner_rows_and_bear_title() {
-        use crate::flavor::PetStyle;
-        let app = AppState::new();
+    fn emoji_unified_picker_and_animated_title() {
+        use crate::flavor::{CompanionKind, PetStyle, SpinnerStyle, PET_TICKS_PER_FRAME};
 
-        // Default pet = bear (the tab identity), and `/pets` resolves (so does `/emoji`).
-        assert_eq!(PetStyle::default(), PetStyle::Bear);
-        assert_eq!(app.pet_style, PetStyle::Bear);
-        assert!(crate::commands::resolve("pets").is_some(), "/pets resolves");
-        assert_eq!(crate::commands::resolve("emoji").unwrap().alias_of, Some("pets"), "/emoji is an alias of /pets");
+        // /pets removed; /emoji is the PRIMARY command (not an alias).
+        assert!(crate::commands::resolve("pets").is_none(), "/pets must no longer resolve");
+        let emoji = crate::commands::resolve("emoji").expect("/emoji resolves");
+        assert!(emoji.alias_of.is_none(), "/emoji must be a primary command, not an alias");
 
-        // The picker is the 5 pet styles + Off (ids 0..=5) — NOTHING else.
+        let mut app = AppState::new();
+        assert_eq!(app.companion, CompanionKind::Pet(PetStyle::Bear), "default companion = bear");
+
+        // Picker: 3 spinner rows (ids 100/101/102) + 5 pet rows (0-4) + Off (5) = 9.
         let items = emoji_picker_items(&app);
-        assert_eq!(items.len(), 6, "pet styles + Off only, got {:?}", items);
-        assert!(
-            items.iter().all(|it| it.id <= 5),
-            "no spinner row (id ≥ 100) survives in the picker: {:?}",
-            items.iter().map(|it| (it.id, it.label.clone())).collect::<Vec<_>>()
+        assert_eq!(
+            items.len(),
+            9,
+            "3 spinner + 5 pet + off = 9: {:?}",
+            items.iter().map(|i| (i.id, i.label.clone())).collect::<Vec<_>>()
         );
-        for bad in ["spinner", "arc", "braille", "pulse"] {
+        assert_eq!(items.iter().filter(|i| i.id >= 100).count(), 3, "3 spinner rows (id >= 100)");
+        for name in ["braille", "arc", "pulse"] {
             assert!(
-                !items.iter().any(|it| it.label.to_ascii_lowercase().contains(bad)),
-                "no `{bad}` row in the pet picker: {:?}",
-                items.iter().map(|it| it.label.clone()).collect::<Vec<_>>()
+                items.iter().any(|i| i.label.to_ascii_lowercase().contains(name)),
+                "spinner row {name} present: {:?}",
+                items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
             );
         }
 
-        // The dynamic tab title: bear face + active session name + GenericAgent, no NativeClaude.
-        let title = app.terminal_title();
-        let bear_calm = crate::flavor::PETS_BEAR[0][0]; // "ʕ•ᴥ•ʔ"
-        assert!(title.starts_with(bear_calm), "the title leads with the bear face: {title:?}");
-        assert!(title.contains(app.sessions.active_name()), "the active session name is in the title: {title:?}");
-        assert!(title.contains("GenericAgent"), "GenericAgent is in the title: {title:?}");
-        assert!(!title.contains("NativeClaude"), "the title must NOT contain NativeClaude: {title:?}");
+        // Selecting a pet (id 0 = Bear) then a spinner (id 100 = Braille) flips companion.
+        apply_emoji_choice(&mut app, 0);
+        assert_eq!(app.companion, CompanionKind::Pet(PetStyle::all()[0]));
+        apply_emoji_choice(&mut app, 100);
+        assert_eq!(app.companion, CompanionKind::Spinner(SpinnerStyle::Braille));
+
+        // The tab title ANIMATES: a pet companion's face advances across ticks.
+        apply_emoji_choice(&mut app, 0); // Bear
+        app.spinner_tick = 0;
+        let t0 = app.terminal_title();
+        app.spinner_tick = PET_TICKS_PER_FRAME; // one pet-frame later
+        let t1 = app.terminal_title();
+        assert_ne!(t0, t1, "tab title must animate (tick 0 vs {PET_TICKS_PER_FRAME}): {t0:?} vs {t1:?}");
+        assert!(t0.contains("GenericAgent"), "title has GenericAgent: {t0:?}");
+        assert!(!t0.contains("NativeClaude"), "no NativeClaude: {t0:?}");
+
+        // A braille companion's title leads with the braille glyph, not a pet face.
+        apply_emoji_choice(&mut app, 100);
+        app.spinner_tick = 0;
+        let tb = app.terminal_title();
+        assert!(
+            tb.starts_with(SpinnerStyle::Braille.glyph(0)),
+            "braille companion title leads with the braille glyph: {tb:?}"
+        );
     }
 
     /// THE deliverable test: the `/rewind` truncation COUNT.

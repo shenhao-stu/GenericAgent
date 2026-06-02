@@ -208,7 +208,7 @@ fn render_row<'a>(
             let (glyph, glyph_tok) = status_glyph(status, elapsed_ms);
             let glyph_str = if status == crate::app::session::SessionStatus::Working {
                 let tick = (now_ms / 100) as u64;
-                app.spinner_style.glyph(tick).to_string()
+                app.companion.spinner_style().glyph(tick).to_string()
             } else {
                 glyph.to_string()
             };

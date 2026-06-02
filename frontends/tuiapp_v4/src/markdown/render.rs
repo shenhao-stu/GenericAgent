@@ -35,24 +35,173 @@ pub(crate) const ATOMIC: Modifier = Modifier::RAPID_BLINK;
 /// line between block elements (CC's `gap={1}` spacing). It never panics: the
 /// math sub-renderer degrades to literal LaTeX, the code highlighter degrades to
 /// plain text, and unknown constructs fall back to their text content.
+///
+/// FIX-E: Before handing the source to pulldown-cmark (which consumes `\<non-alpha>`
+/// as markdown escape sequences), we pre-scan for whole-paragraph `$$…$$` blocks
+/// and render them directly via the block-math path, splicing them back into the
+/// output after pulldown processes the rest. This prevents `\,` (thin space) and
+/// similar LaTeX commands from being corrupted.
+///
+/// FIX-D: accepts an optional `width` for the HR rule. Pass `None` to use the
+/// default wide value (80).
 pub fn render_markdown(source: &str, theme: &Theme) -> Vec<Line<'static>> {
+    render_markdown_width(source, theme, 80)
+}
+
+/// Like [`render_markdown`] but thread a terminal `width` for width-aware HR
+/// rendering (FIX-D).
+pub fn render_markdown_width(source: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    // FIX-E: Pre-scan for `$$…$$` block-math paragraphs BEFORE pulldown can eat
+    // the backslash escapes inside them. We split the source on paragraph
+    // boundaries (blank lines), check each paragraph, and short-circuit the math
+    // ones to the block-math renderer; the rest go through pulldown normally.
+    //
+    // Implementation strategy: replace each block-math paragraph with a unique
+    // ASCII-only placeholder line, let pulldown parse the placeholder-substituted
+    // source, then splice the pre-rendered block-math lines back at the
+    // placeholder positions in the output.
+    let (modified_source, math_blocks) = extract_block_math_paragraphs(source);
+
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(source, opts);
+    let parser = Parser::new_ext(&modified_source, opts);
 
-    let mut w = Walker::new(theme);
+    let mut w = Walker::new(theme, width);
     for ev in parser {
         w.event(ev);
     }
-    w.finish()
+    let mut out = w.finish();
+
+    // Splice the pre-rendered block-math lines back at placeholder positions.
+    if !math_blocks.is_empty() {
+        splice_math_blocks(&mut out, &math_blocks, theme);
+    }
+    out
+}
+
+/// Pre-scan `source` for whole-paragraph `$$…$$` blocks (FIX-E). Returns:
+///   - a modified source where each block-math paragraph is replaced with a
+///     placeholder line `\x01BLOCKMATH{idx}\x01` (pulldown treats it as a
+///     paragraph of plain text, which we then replace in the output).
+///   - a vec of `(idx, latex_body)` pairs for the detected blocks.
+fn extract_block_math_paragraphs(source: &str) -> (String, Vec<(usize, String)>) {
+    // Split on paragraph boundaries (one or more blank lines between blocks).
+    // We keep the exact original offsets so we can reconstruct the source with
+    // placeholders.
+    let mut math_blocks: Vec<(usize, String)> = Vec::new();
+    let mut result = String::with_capacity(source.len());
+    let mut idx = 0usize;
+
+    // Walk paragraph chunks: split on double-newline runs.
+    let mut start = 0usize;
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+
+    while i <= len {
+        // Detect the end of a paragraph chunk: two or more consecutive newlines,
+        // OR the end of the string.
+        let is_end = i == len;
+        let is_blank_sep = !is_end
+            && bytes[i] == b'\n'
+            && (i + 1 < len && (bytes[i + 1] == b'\n' || bytes[i + 1] == b'\r'));
+
+        if is_end || is_blank_sep {
+            let chunk = &source[start..i];
+            let trimmed = chunk.trim();
+
+            if let Some(latex) = extract_single_block_math(trimmed) {
+                result.push_str(&format!("\x01BLOCKMATH{idx}\x01"));
+                math_blocks.push((idx, latex));
+                idx += 1;
+            } else {
+                result.push_str(chunk);
+            }
+
+            // End of source: done. Break BEFORE the separator-advance so `i`
+            // (== len) can never spin — the bug that hung every markdown render.
+            if is_end {
+                break;
+            }
+
+            // Advance past the blank-line separator, preserving it verbatim so the
+            // reconstructed source keeps paragraph boundaries.
+            let sep_start = i;
+            let mut j = i;
+            while j < len && (bytes[j] == b'\n' || bytes[j] == b'\r') {
+                j += 1;
+            }
+            result.push_str(&source[sep_start..j]);
+            i = j;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+
+    (result, math_blocks)
+}
+
+/// Detect a SINGLE `$$…$$` block in a trimmed paragraph string. The interior must
+/// be non-empty and contain no blank lines (a block-math paragraph is a single $$
+/// run). Returns the inner LaTeX body if detected.
+fn extract_single_block_math(trimmed: &str) -> Option<String> {
+    if trimmed.len() < 4 {
+        return None;
+    }
+    if !trimmed.starts_with("$$") || !trimmed.ends_with("$$") {
+        return None;
+    }
+    // Must not start AND end with `$$` where the whole string IS `$$` (len=2
+    // per-side = 4 chars minimum, inner = trimmed[2..len-2]).
+    // Edge: `$$` itself (len=2) is handled by the len<4 guard above.
+    let inner = &trimmed[2..trimmed.len() - 2];
+    // The interior must not be empty and must not contain a blank line (those
+    // would indicate a new paragraph boundary, not a single block).
+    if inner.trim().is_empty() {
+        return None;
+    }
+    // Reject if inner contains `\n\n` (multi-paragraph — not a block-math para).
+    if inner.contains("\n\n") {
+        return None;
+    }
+    // Also reject if the opening `$$` is followed immediately by `$$` (the `$$$$`
+    // edge case where inner="" — already caught by trim().is_empty() above).
+    Some(inner.trim().to_string())
+}
+
+/// Splice pre-rendered block-math lines back into `out` at placeholder positions
+/// (FIX-E). A placeholder paragraph renders as a single text line whose content
+/// is the placeholder string `\x01BLOCKMATH{n}\x01`. We find those lines in `out`
+/// and replace them (and their surrounding blank-gap lines) with the math rows.
+fn splice_math_blocks(
+    out: &mut Vec<Line<'static>>,
+    math_blocks: &[(usize, String)],
+    theme: &Theme,
+) {
+    for (idx, latex) in math_blocks {
+        let placeholder = format!("\x01BLOCKMATH{idx}\x01");
+        // Find the line whose concatenated span text equals the placeholder.
+        let pos = out.iter().position(|l| {
+            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            t.trim() == placeholder.as_str()
+        });
+        if let Some(p) = pos {
+            let math_lines = super::inline_math::render_block_math(latex, theme);
+            // Replace just the placeholder row with the math rows.
+            out.splice(p..p + 1, math_lines);
+        }
+    }
 }
 
 /// The walker state: a list of completed lines plus the in-progress line's spans,
 /// an indent/list/quote context stack, and buffers for tables and code blocks.
 struct Walker<'t> {
     theme: &'t Theme,
+    /// Terminal width for width-aware rendering (FIX-D: HR rule).
+    width: u16,
     /// Completed output rows.
     out: Vec<Line<'static>>,
     /// Spans accumulated for the current (not-yet-flushed) row.
@@ -89,9 +238,10 @@ struct ListState {
 }
 
 impl<'t> Walker<'t> {
-    fn new(theme: &'t Theme) -> Self {
+    fn new(theme: &'t Theme, width: u16) -> Self {
         Walker {
             theme,
+            width,
             out: Vec::new(),
             cur: Vec::new(),
             style_stack: Vec::new(),
@@ -257,9 +407,21 @@ impl<'t> Walker<'t> {
                 }
             }
             Event::SoftBreak => {
-                // A soft break is a space; the wrap cache handles visual wrapping.
+                // FIX-C: Inside a blockquote, a soft break must produce a NEW ROW
+                // so that `> line1\n> line2` renders as two separate `│ `-prefixed
+                // rows (matching tui_v3's HardBreakMarkdown behaviour). Outside a
+                // blockquote, keep the original space so ordinary prose doesn't
+                // reflow (one visual line per source line would break parity for
+                // wrapped paragraphs since the wrap cache uses word-wrap, not hard
+                // line-per-source-line).
                 if self.code.is_none() && self.table.is_none() {
-                    self.cur.push(Span::raw(" "));
+                    if self.quote_depth > 0 {
+                        // Blockquote: treat as a hard line break → two rows.
+                        self.flush_pending();
+                        self.flush_line();
+                    } else {
+                        self.cur.push(Span::raw(" "));
+                    }
                     if let Some(p) = self.para.as_mut() {
                         p.push(' ');
                     }
@@ -272,9 +434,12 @@ impl<'t> Walker<'t> {
                 }
             }
             Event::Rule => {
+                // FIX-D: use the threaded terminal width for a full-width rule.
+                // Subtract 2 to leave a margin; clamp to at least 4.
                 self.block_gap();
+                let w = (self.width as usize).saturating_sub(2).max(4);
                 self.out.push(Line::from(Span::styled(
-                    "────────".to_string(),
+                    "─".repeat(w),
                     self.col(Token::Border),
                 )));
                 self.started = true;
@@ -309,15 +474,31 @@ impl<'t> Walker<'t> {
                 self.para = Some(String::new());
             }
             Tag::Heading { level, .. } => {
+                // FIX-B: differentiate the six levels by MODIFIER + per-level color
+                // (H1=BOLD|UNDERLINED, H2=BOLD, H3=BOLD|ITALIC, H4-H6=ITALIC). The
+                // round-4 rule stands: NO bare `#`/`##` glyph — the level is conveyed
+                // by style alone (the clean tui_v3/CC look), never a hash prefix.
                 self.block_gap();
-                // Render the heading as clean BOLD + colored text (no literal `#`
-                // glyph) — the per-level color is the restrained level cue.
                 let tok = code::heading_style(level);
-                self.style_stack.push(
-                    Style::default()
-                        .fg(self.theme.color(tok))
-                        .add_modifier(Modifier::BOLD),
-                );
+                let base_style = Style::default().fg(self.theme.color(tok));
+                let heading_style = match level {
+                    pulldown_cmark::HeadingLevel::H1 => {
+                        base_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    }
+                    pulldown_cmark::HeadingLevel::H2 => {
+                        base_style.add_modifier(Modifier::BOLD)
+                    }
+                    pulldown_cmark::HeadingLevel::H3 => {
+                        base_style.add_modifier(Modifier::BOLD | Modifier::ITALIC)
+                    }
+                    _ => {
+                        // H4, H5, H6
+                        base_style.add_modifier(Modifier::ITALIC)
+                    }
+                };
+                // No hash prefix (round-4 rule) — just push the level style; the
+                // heading text inherits BOLD/UNDERLINED/ITALIC + color from it.
+                self.style_stack.push(heading_style);
             }
             Tag::BlockQuote(_) => {
                 self.block_gap();
@@ -457,10 +638,21 @@ impl<'t> Walker<'t> {
             }
             TagEnd::List(_) => {
                 self.lists.pop();
-                self.started = true;
+                // FIX-F: only set started=true when we just popped the TOP-LEVEL
+                // list. For a nested list end, the parent list's item-gap management
+                // owns spacing — setting started=true here causes block_gap() to
+                // insert a spurious blank before the next sibling item.
+                if self.lists.is_empty() {
+                    self.started = true;
+                }
             }
             TagEnd::Item => {
-                self.flush_line();
+                // FIX-F: flush only when the item line still holds content. An item
+                // that CONTAINS a nested list already had its text flushed when the
+                // nested list's first item started, so `cur` is empty here — an
+                // unconditional flush_line() would emit a spurious blank row before
+                // the next sibling item.
+                self.flush_pending_line_if_content();
             }
             TagEnd::Emphasis
             | TagEnd::Strong
@@ -484,18 +676,19 @@ impl<'t> Walker<'t> {
                 self.started = true;
             }
             TagEnd::TableHead => {
+                // FIX-A: TagEnd::TableCell already flushed the last cell into
+                // cur_row before this fires, so cur_cell is empty here. The old
+                // code did an extra take+push of the (empty) cur_cell, producing a
+                // phantom empty column. Remove the redundant push.
                 if let Some(tb) = self.table.as_mut() {
-                    let cell = std::mem::take(&mut tb.cur_cell);
-                    tb.cur_row.push(cell);
                     tb.header = std::mem::take(&mut tb.cur_row);
                     tb.in_header = false;
                 }
             }
             TagEnd::TableRow => {
+                // FIX-A: same phantom-column fix as TableHead above.
                 if let Some(tb) = self.table.as_mut() {
                     if !tb.in_header {
-                        let cell = std::mem::take(&mut tb.cur_cell);
-                        tb.cur_row.push(cell);
                         let row = std::mem::take(&mut tb.cur_row);
                         tb.rows.push(row);
                     }
@@ -685,5 +878,203 @@ the final answer is 42";
         let _ = render_markdown("math $\\frac{1}{ unclosed", &theme);
         let _ = render_markdown("", &theme);
         let _ = render_markdown("你好 **世界** `代码`", &theme);
+    }
+
+    #[test]
+    fn rich_fixture_recon_all_elements() {
+        // RECON test: feed the full fixture through the live path and print every row.
+        let theme = Theme::default_theme();
+        let fixture = "# H1 Heading\n\n## H2 Heading\n\n### H3 Heading\n\n#### H4 Heading\n\n##### H5 Heading\n\n###### H6 Heading\n\n| Left | Center | Right |\n|:-----|:------:|------:|\n| a    | b      | c     |\n| long cell | x | 99 |\n\n**bold text** and *italic text* and `inline code` and ~~strikethrough~~ text\n\n1. First item\n2. Second item\n   1. Nested ordered\n3. Third\n\n- Bullet one\n- Bullet two\n  - Nested bullet\n  - Another nested\n- Bullet three\n\n> This is a blockquote\n> with two lines\n\n[a link](https://example.com)\n\n```rust\nfn hello() {\n    println!(\"world\");\n}\n```\n\n---\n\nInline math: $E=mc^2$ and $\\sum_{i=0}^{n} x_i$\n\nBlock math paragraph:\n\n$$\\int_0^1 x\\,dx$$\n";
+
+        let lines = render_markdown(fixture, &theme);
+        eprintln!("\n=== RICH FIXTURE RENDERED ({} rows) ===", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let mods: Vec<String> = line.spans.iter().flat_map(|s| {
+                let mut v = vec![];
+                if s.style.add_modifier.contains(Modifier::BOLD) { v.push("BOLD".to_string()); }
+                if s.style.add_modifier.contains(Modifier::ITALIC) { v.push("ITAL".to_string()); }
+                if s.style.add_modifier.contains(Modifier::CROSSED_OUT) { v.push("STRIKE".to_string()); }
+                v
+            }).collect();
+            let mods_str = if mods.is_empty() { String::new() } else { format!(" [{:?}]", mods) };
+            eprintln!("  [{:03}] {:?}{}", i, text, mods_str);
+        }
+        eprintln!("=== END ===");
+
+        let all: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect::<Vec<_>>().join("");
+
+        // Presence assertions (all must pass for RENDERS-OK):
+        assert!(all.contains("H1 Heading"), "H1 missing");
+        assert!(all.contains("H2 Heading"), "H2 missing");
+        assert!(all.contains("H3 Heading"), "H3 missing");
+        assert!(all.contains("H4 Heading"), "H4 missing");
+        assert!(all.contains("H5 Heading"), "H5 missing");
+        assert!(all.contains("H6 Heading"), "H6 missing");
+        assert!(all.contains("Left") && all.contains("Center") && all.contains("Right"), "table header missing");
+        assert!(all.contains("long cell"), "table body missing");
+        assert!(all.contains("bold text"), "bold text missing");
+        assert!(all.contains("italic text"), "italic text missing");
+        assert!(all.contains("inline code"), "inline code missing");
+        assert!(all.contains("strikethrough"), "strikethrough text missing");
+        assert!(all.contains("First item"), "ordered list missing");
+        assert!(all.contains("•"), "bullet missing");
+        assert!(all.contains("│ ") && all.contains("blockquote"), "blockquote missing");
+        assert!(all.contains("a link") && all.contains("https://example.com"), "link missing");
+        assert!(all.contains("fn hello"), "fenced code missing");
+        // HR: a row of all ─
+        assert!(lines.iter().any(|l| {
+            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            !t.is_empty() && t.chars().all(|c| c == '─')
+        }), "HR missing");
+        // Math
+        assert!(!all.contains('$'), "raw $ leaked");
+        assert!(all.contains('∑'), "inline sum math missing");
+        // Block integral
+        assert!(all.contains('∫') || lines.iter().any(|l| {
+            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            t.chars().all(|c| c == '─') && !t.is_empty()
+        }), "block math (integral/bar) missing");
+        // Strikethrough modifier
+        assert!(lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
+            s.style.add_modifier.contains(Modifier::CROSSED_OUT)
+        }), "CROSSED_OUT modifier missing on strikethrough");
+    }
+
+    // ── HONEST-CHECK TESTS (R2 §5) ─────────────────────────────────────────────
+    // Each test exercises the LIVE path (render_markdown → Vec<Line>) and is
+    // designed to FAIL on the old code and PASS after the corresponding FIX.
+
+    /// FIX-A: a 3-column GFM table must have exactly 4 `│` glyphs per row (border
+    /// + 2 separators + border = 4), not 5 (phantom 4th column from the old
+    /// double-push in TagEnd::TableHead / TagEnd::TableRow).
+    #[test]
+    fn table_no_phantom_column() {
+        let theme = Theme::default_theme();
+        let src = "| A | B | C |\n|---|---|---|\n| x | y | z |\n";
+        let lines = render_markdown(src, &theme);
+        // The first non-blank line is the table header.
+        let header: String = lines
+            .iter()
+            .find(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.contains('│')
+            })
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .unwrap_or_default();
+        let pipe_count = header.chars().filter(|&c| c == '│').count();
+        assert_eq!(
+            pipe_count, 4,
+            "3-column table must have exactly 4 │ glyphs (no phantom col), got {} in {:?}",
+            pipe_count, header
+        );
+    }
+
+    /// FIX-B: headings must be visually distinct by STYLE (no bare hash — round-4
+    /// rule): H1 has `UNDERLINED`, H3 has `ITALIC`; the level is conveyed by
+    /// modifier + per-level color, never a `#` glyph.
+    #[test]
+    fn heading_levels_are_visually_distinct() {
+        let theme = Theme::default_theme();
+        let src = "# H1\n\n## H2\n\n### H3\n\n###### H6\n";
+        let lines = render_markdown(src, &theme);
+
+        // H1: NO bare hash glyph (round-4 clean look) AND an UNDERLINED span.
+        let h1_row: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!h1_row.contains('#'), "H1 must NOT show a bare hash (round-4 rule): {:?}", h1_row);
+        let h1_underline = lines[0]
+            .spans
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(h1_underline, "H1 must have UNDERLINED modifier; spans: {:?}", lines[0].spans);
+
+        // H3: must have ITALIC modifier on the text span.
+        let h3_row_idx = lines
+            .iter()
+            .position(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.contains("H3")
+            })
+            .expect("H3 row not found");
+        let h3_italic = lines[h3_row_idx]
+            .spans
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(h3_italic, "H3 must have ITALIC modifier");
+    }
+
+    /// FIX-C: two blockquote lines separated by a soft break must render as TWO
+    /// separate `│ `-prefixed rows (not collapsed into one).
+    #[test]
+    fn blockquote_two_lines_render_as_two_rows() {
+        let theme = Theme::default_theme();
+        let src = "> line one\n> line two\n";
+        let lines = render_markdown(src, &theme);
+        let content_rows: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .filter(|t| t.contains("│ "))
+            .collect();
+        assert_eq!(
+            content_rows.len(),
+            2,
+            "two >-lines must produce two │-prefixed rows, got: {:?}",
+            content_rows
+        );
+        assert!(content_rows[0].contains("line one"), "first row: {:?}", content_rows[0]);
+        assert!(content_rows[1].contains("line two"), "second row: {:?}", content_rows[1]);
+    }
+
+    /// FIX-E: block math `\,` (thin space) must NOT be corrupted by pulldown-cmark.
+    /// The rendered output must contain `∫` (integral) and NO literal comma from `\,`.
+    #[test]
+    fn block_math_thin_space_not_corrupted() {
+        let theme = Theme::default_theme();
+        let src = "$$\\int_0^1 x\\,dx$$\n";
+        let lines = render_markdown(src, &theme);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The integral glyph must be present (math rendered at all).
+        assert!(joined.contains('∫'), "integral glyph must be present: {:?}", joined);
+        // `\,` must NOT produce a literal comma in the math body.
+        // The rendered form is `∫ x dx` (space) or `∫ xdx` — not `∫ x,dx`.
+        assert!(
+            !joined.contains(",dx"),
+            "\\, must not produce a literal comma before 'dx': {:?}",
+            joined
+        );
+    }
+
+    /// FIX-F: a nested ordered list must NOT insert a spurious blank row between
+    /// the end of the nested list and the next sibling item in the parent list.
+    #[test]
+    fn nested_list_no_spurious_blank() {
+        let theme = Theme::default_theme();
+        let src = "1. First\n2. Second\n   1. Nested\n3. Third\n";
+        let rows: Vec<String> = render_markdown(src, &theme)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // Find the "Nested" row.
+        let nested_idx = rows
+            .iter()
+            .position(|r| r.contains("Nested"))
+            .expect("Nested item not found in output");
+        // The row immediately after "Nested" must not be blank.
+        assert!(
+            !rows[nested_idx + 1].is_empty(),
+            "row after nested list item must not be blank, got: {:?}",
+            &rows[nested_idx..]
+        );
+        // It must be item 3.
+        assert!(
+            rows[nested_idx + 1].contains("3."),
+            "row after nested list must be item 3, got: {:?}",
+            &rows[nested_idx + 1]
+        );
     }
 }

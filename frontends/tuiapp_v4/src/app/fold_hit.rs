@@ -44,14 +44,19 @@ impl AppState {
     }
 
     /// Resolve a transcript left-click at full-frame `(col, row)` to the fold node
-    /// whose triangle/bullet column it hit (Fix E / Q8), or `None`. The clickable
-    /// zone is the FIRST [`FOLD_HIT_COLS`] cells of a node's visual rows (the `▸`/`⏺`
-    /// gutter) — a click in the body flows through to native selection. `row` is
-    /// mapped to a global visual index via the transcript region top + the viewport
-    /// top, mirroring [`crate::components::dashboard::click_to_row_index`]. PURE-ish
-    /// (reads `node_hit` + the viewport).
+    /// whose triangle/bullet column it hit (Fix E / Q8 / S1 Fix C), or `None`.
+    ///
+    /// Hit zone per node type (S1 Fix C):
+    ///   * `NodeId::Turn` — narrow gutter: first [`FOLD_HIT_COLS`] cols only (the
+    ///     `▸`/`▾` gutter lives in col 0–1).
+    ///   * `NodeId::Tool` — FULL width: the whole box (including the `▾` affordance
+    ///     row at col 2 inside the `│ … │` interior). Fixes the latent bug where
+    ///     `FOLD_HIT_COLS=2` silently rejected clicks on col 2+ of the tool box.
+    ///
+    /// `row` is mapped to a global visual index via the transcript region top + the
+    /// viewport top. PURE-ish (reads `node_hit` + the viewport).
     pub fn transcript_node_at(&self, col: u16, row: u16, transcript_top: u16) -> Option<NodeId> {
-        if col >= FOLD_HIT_COLS || row < transcript_top {
+        if row < transcript_top {
             return None;
         }
         let offset = (row - transcript_top) as usize;
@@ -61,10 +66,23 @@ impl AppState {
             return None;
         }
         let visual = self.viewport.visual_top(&self.wrap_cache) + offset;
-        self.node_hit
+        let candidate = self.node_hit
             .iter()
             .find(|(range, _)| range.contains(&visual))
-            .map(|(_, node)| *node)
+            .map(|(_, node)| *node);
+        let Some(node) = candidate else {
+            return None;
+        };
+        // Per-node hit zone: Turn → narrow gutter (col 0–1 = the ▸/▾ glyph zone);
+        // Tool → full width (the whole box, including the ▾ affordance at col 2).
+        let max_col: u16 = match node {
+            NodeId::Turn { .. } => FOLD_HIT_COLS,
+            NodeId::Tool { .. } => u16::MAX, // full width
+        };
+        if col >= max_col {
+            return None;
+        }
+        Some(node)
     }
 
     /// Handle a left-click at full-frame `(col, row)` (transcript region top

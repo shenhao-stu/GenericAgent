@@ -1,3 +1,21 @@
+> **实现状态 — Round 5（2026-06-03）：实现完成 + Opus 对抗 Monitor 全 CONFIRMED。v0.5.0（370 测试 / 0 失败 / 0 警告，release exe 已出）。**
+> **本轮重大事故并已修复：S3 由 Sonnet agent 写入的 `extract_block_math_paragraphs` 死循环（EOF 时 `continue` 不前进 `i`）→ 每次 markdown 渲染都卡死 → cargo test 测试二进制 100% CPU 把用户电脑卡死。已 `break` 修复（render.rs:125）；实现/收尾改用 Opus、测试 gate 全部 `timeout` 自杀、单 cargo 串行。Monitor 用独立复刻在 empty/EOF/无换行 输入上验证所有循环必终止。**
+>
+> **逐项已落地并经渲染确认（√）：** 鼠标 TOGGLE 模型（默认原生选中=不捕获+`?1007h`，`/mouse`·`Ctrl+Shift+M` 切捕获点击折叠；footer 显 `mouse: select/click`）√ · 展开 turn 有 ` ▾ ` 头可再点折叠、▸⇄▾ 旋转、工具盒全宽命中 √ · markdown 表格无幽灵列/各级标题靠粗体下划线斜体+色区分（**不出裸 `#`**，沿用 R4 规则）/引用多行/LaTeX `\,` 不被吞（`∫ x dx` 非 `∫ x,dx`）/嵌套列表无空行 √ · 大段空白消除（transcript `following && total<h` 时底部对齐）√ · spinner `↑in · ↓out` 双箭头 + 缓动渐变（非瞬变）、`⎿`→`└` √ · `/emoji` 统一 9 选一（braille/bear/cat…）驱动 spinner LEAD + 动态 tab，删 `/pets` √ · 滚动时顶部固定显示上一条用户输入（`↑ <prompt>`）√ · `/keybindings` 补 `Ctrl+G` 暂存 + v3→v4 改键说明 √ · ctx% 保持真实（`context_win*3` 是 GA 真实 trim 触发点，非 bug，未动）。**Monitor M1–M5 全 CONFIRMED。**
+>
+> **待你实跑确认（headless 判不了）：** 原生鼠标选中+复制在你终端的手感、各命令特效配色。计划 `IMPLEMENTATION_PLAN_R5.md`，spec `recon/round5/R1..R6`。
+
+## Round 5 需求（本轮，逐条对照实现）
+
+1. **鼠标选中+复制**：默认不捕获鼠标→终端原生拖选复制（Codex `?1007h` 模型），`/mouse`·`Ctrl+Shift+M` 切到捕获模式点击折叠（你选的"两者可切换"）。
+2. **折叠交互**：展开任意步骤后可再次点击折叠；▸（折叠）⇄ ▾（展开）三角旋转，参考 tuiapp_v2 风格。
+3. **markdown/LaTeX**：表格/各级标题/各种语法/公式正常渲染（实为 5 个精确 bug，非"完全没渲染"）；参考 codex-src。
+4. **大段空白**：transcript 底部对齐，消除内容与 spinner 间的大段空白。
+5. **spinner/tip**：active 行加 ↑ 输入箭头、↑↓ 缓动渐变（非瞬变）；`⎿ Tip`→`└ Tip`；cost/ctx 核对（ctx 真实，未动）。
+6. **emoji 统一**：删 `/pets`，braille/bear/cat… 合为 `/emoji` 多选一，驱动 spinner + 动态 tab emoji。
+7. **滚动顶部固定**：滚动时顶部显示最近上一条用户输入消息。
+8. **审计 + Monitor**：对齐 tuiapp_v2/tui_v3 全功能（审计=无缺命令）、Opus 对抗 Monitor 全过、清理 temp。
+
 > **实现状态 — Round 4（2026-06-01）：实现完成 + Monitor 验证（待你实跑确认观感）。v0.4.0。**
 > **诚实复盘：Round 3 的「12 项全过」是假阳性** —— 验证只走 headless `--dump-frame` + 干净 fixture 单测（finalized/plain 路径），从未跑你真正看到的 **live/styled 流式路径**。本轮全部走 live/styled 验证（喂 `apply_bridge_event` + 扫 styled 帧 + 真键鼠事件），并用渲染态对抗 Monitor 复核（非"测试绿"）。
 >

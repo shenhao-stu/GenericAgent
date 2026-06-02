@@ -89,6 +89,7 @@ pub(crate) fn keybinding_pairs() -> &'static [(&'static str, &'static str)] {
         ("PgUp/PgDn · Ctrl+Home/End", "kb.scroll"),
         ("←/→ (empty input)", "kb.views"),
         ("Ctrl+S", "kb.dashboard"),
+        ("Ctrl+G", "kb.stash"),
         ("Ctrl+N", "kb.new_session"),
         ("Ctrl+↑/↓", "kb.cycle_session"),
         ("Ctrl+W / Ctrl+D", "kb.drop_session"),
@@ -288,4 +289,39 @@ pub(crate) fn render_btw(
         Style::default().fg(theme.color(Token::Dim)),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// SLICE S7: the `/keybindings` overlay documents the intentional v3→v4 chord
+    /// remaps so migrating users aren't surprised — the fold chord (moved off
+    /// `Ctrl+O`), the copy-reply key, the stash chord (moved to `Ctrl+G`), the
+    /// dashboard + branch keys, and the mouse-mode toggle + native-select hint are
+    /// all present. LIVE styled render of the overlay.
+    #[test]
+    fn keybindings_overlay_lists_v3_to_v4_remaps() {
+        let theme = Theme::default_theme();
+        let (w, h) = (96u16, 32u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render_keybindings(f, Rect::new(0, 0, w, h), &theme, Lang::En))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let screen: String = (0..h as usize)
+            .map(|y| (0..w as usize).map(|x| buf.content()[y * w as usize + x].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for chord in ["Ctrl+O", "Ctrl+Shift+O", "Ctrl+G", "Ctrl+S", "Ctrl+B", "Ctrl+Shift+M"] {
+            assert!(screen.contains(chord), "keybindings overlay must list `{chord}`:\n{screen}");
+        }
+        // The native-select hint (the round-5 mouse model) is shown.
+        assert!(
+            screen.contains("select") || screen.contains("native"),
+            "the native-select mouse hint must appear:\n{screen}"
+        );
+    }
 }

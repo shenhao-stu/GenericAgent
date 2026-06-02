@@ -22,7 +22,7 @@ use crate::app::effort::{EffortSlider, ReasoningEffort};
 use crate::app::session::SessionMap;
 use crate::app_event::AppEvent;
 use crate::effects::{EffectMode, EffectsEngine};
-use crate::flavor::{Lang, PetStyle, SpinnerStyle};
+use crate::flavor::{CompanionKind, Lang};
 use crate::input::keychord::ChordState;
 use crate::input::Composer;
 use crate::render::fold::{BlockFolds, NodeId};
@@ -69,11 +69,9 @@ pub struct AppState {
     pub composer: Composer,
     /// A 0.1s tick counter that drives the spinner + gerund rotation.
     pub spinner_tick: u64,
-    /// The active spinner aesthetic (N4 default = arc).
-    pub spinner_style: SpinnerStyle,
-    /// The active pet-face style (§9 "soul"; switched via the `/pets` picker). Drives
-    /// the tab-title face; defaults to Bear (Slice 6) so the tab is bear out of the box.
-    pub pet_style: PetStyle,
+    /// The unified /emoji companion selection (spinner glyph or pet face).
+    /// Drives both the spinner lead glyph and the tab-title face.
+    pub companion: CompanionKind,
     /// The reasoning-effort level last applied via `/effort` (redesign_cc.md §3).
     /// `None` until the user sets one (the backend keeps its own default); once set
     /// the spinner/status shows a `thinking · <level>` suffix and the `/effort`
@@ -94,10 +92,10 @@ pub struct AppState {
     /// Tab/Enter completes the highlighted one). Reset to 0 whenever the typed
     /// partial changes; clamped to the live match count by the renderer + nav.
     pub palette_sel: usize,
-    /// Whether terminal mouse capture is ON (wheel scroll + click-to-dashboard).
-    /// Toggled by Ctrl+Shift+M / `/mouse`. When OFF, the terminal's OWN drag-select
-    /// works again so the user can select + copy transcript/input text natively
-    /// (the Codex model — the portable answer to "can't copy inline" on Windows).
+    /// Whether terminal mouse capture is ON (INTERACTIVE mode: click fold ▸/▾ +
+    /// wheel ScrollUp/Down). Defaults to `false` (NATIVE mode, S1): native drag-select
+    /// works and wheel translates to arrow keys via EnableAlternateScroll (?1007h).
+    /// Toggled by Ctrl+Shift+M / `/mouse`; the mode is shown in the session-info row.
     pub mouse_capture: bool,
     /// The interface language (drives rotating tips; full i18n is Phase 3).
     pub lang: Lang,
@@ -131,6 +129,11 @@ pub struct AppState {
     /// cumulative `cost.{input,output}`; `None` until a `Status` carries them.
     pub tok_in: Option<u64>,
     pub tok_out: Option<u64>,
+    /// Smoothly-animated DISPLAY values for the spinner's ↑/↓ readout.
+    /// Each tick() steps these toward the live tok_in/tok_out targets.
+    /// None until the first Status frame arrives (shows nothing until data exists).
+    pub display_tok_in: Option<u64>,
+    pub display_tok_out: Option<u64>,
     /// Accumulated session cost in USD (footer `$cost`).
     pub cost_usd: f64,
     /// The current git branch (footer right side), discovered once at startup.
@@ -246,18 +249,18 @@ impl Default for AppState {
             transcript: Vec::new(),
             composer: Composer::new(),
             spinner_tick: 0,
-            spinner_style: SpinnerStyle::default(),
-            pet_style: PetStyle::default(),
+            companion: CompanionKind::default(),
             reasoning_effort: None,
             fold_all: false,
             folds: std::collections::HashMap::new(),
             palette_sel: 0,
-            // Mouse capture starts ON so the WHEEL scrolls (crossterm only delivers
-            // ScrollUp/Down under capture — Slice 0 root cause); `Ctrl+Shift+M` /
-            // `/mouse` flips it OFF for pure native drag-select copy (Q2 / F7), and
-            // `Shift+drag` selects while it is on. This matches `term::setup` (which
-            // enables capture) — the field is the single source of truth.
-            mouse_capture: true,
+            // Mouse capture starts OFF (NATIVE mode, S1): the terminal does native
+            // OS drag-select + copy, and the wheel translates to arrow keys via
+            // EnableAlternateScroll (?1007h). `Ctrl+Shift+M` / `/mouse` flips it ON
+            // for INTERACTIVE mode (click ▸/▾ fold + wheel ScrollUp/Down). Matches
+            // `term::setup` (which does NOT EnableMouseCapture by default) — the
+            // field is the single source of truth.
+            mouse_capture: false,
             lang: Lang::default(),
             busy: false,
             turn_started_ms: 0,
@@ -271,6 +274,8 @@ impl Default for AppState {
             tokens: None,
             tok_in: None,
             tok_out: None,
+            display_tok_in: None,
+            display_tok_out: None,
             cost_usd: 0.0,
             git_branch: None,
             last_tab_status: None,
@@ -338,6 +343,12 @@ impl AppState {
         if let Some(Overlay::Continue(picker)) = self.overlay.as_mut() {
             picker.tick(self.spinner_tick, crate::components::continue_picker::read_head_window);
         }
+        // Ease display_tok_in/display_tok_out toward their live targets each tick (0.1s).
+        // Mirrors CC SpinnerAnimationRow.tsx:142-158: gap-proportional step so small gaps
+        // feel snappy and large jumps animate smoothly.
+        // THIS IS A SINGLE BOUNDED STEP PER CALL, NOT A LOOP.
+        ease_display_tok(&mut self.display_tok_in, self.tok_in);
+        ease_display_tok(&mut self.display_tok_out, self.tok_out);
     }
 
     /// Apply an effects mode change. The `/effects` COMMAND was removed (Slice 7); the
@@ -451,16 +462,22 @@ impl AppState {
         }
     }
 
-    /// The OSC0 terminal title (Slice 6): `<pet-face> <session_name> · GenericAgent`.
-    /// The face is the ACTIVE pet style's heat-aware representative face (frame 0);
-    /// when the pet is `Off` it falls back to the bear constant so the tab keeps the
-    /// bear identity the spec wants in every state. busy vs idle is conveyed by the
-    /// OSC tab-STATUS channel (`tab_status`), not by swapping the title. A nameless
-    /// active session degrades to just `GenericAgent` (no bare `· GenericAgent`).
+    /// The OSC0 terminal title (S5): `<face> <session_name> · GenericAgent`.
+    /// For a pet companion the face animates via spinner_tick / PET_TICKS_PER_FRAME;
+    /// for a spinner companion the animated spinner glyph is used. Pet(Off) falls back
+    /// to the bear constant so the tab always carries the bear identity. busy vs idle
+    /// is conveyed by the OSC tab-STATUS channel, not by swapping the title.
     pub fn terminal_title(&self) -> String {
-        let face = match crate::flavor::pet_face(self.pet_style, self.turn_elapsed_ms(0), 0) {
-            "" => crate::flavor::PETS_BEAR[0][0], // pet Off → keep the bear identity.
-            f => f,
+        use crate::flavor::{CompanionKind, PetStyle, PET_TICKS_PER_FRAME, PETS_BEAR};
+        let tick = self.spinner_tick;
+        let elapsed = self.turn_elapsed_ms(0);
+        let face: String = match self.companion {
+            CompanionKind::Pet(PetStyle::Off) => PETS_BEAR[0][0].to_string(),
+            CompanionKind::Pet(p) => {
+                let f = crate::flavor::pet_face(p, elapsed, tick / PET_TICKS_PER_FRAME);
+                if f.is_empty() { PETS_BEAR[0][0].to_string() } else { f.to_string() }
+            }
+            CompanionKind::Spinner(s) => s.glyph(tick).to_string(),
         };
         let name = self.sessions.active_name();
         if name.is_empty() {
@@ -653,6 +670,18 @@ impl AppState {
             .map(|b| b.source.as_str())
     }
 
+    /// The FIRST line of the most recent USER message — the sticky breadcrumb pinned
+    /// at the top of the transcript while scrolled above the tail (R6 Part A), so the
+    /// user always sees which prompt they are reading under. `None` if there is no
+    /// user turn yet (then the sticky row is not allocated).
+    pub fn last_user_source_first_line(&self) -> Option<&str> {
+        self.transcript
+            .iter()
+            .rev()
+            .find(|b| b.role == Role::User && !b.source.trim().is_empty())
+            .map(|b| b.source.lines().next().unwrap_or("").trim())
+    }
+
     /// The whole transcript joined as plain logical text (the "copy transcript"
     /// target, P2): each block's `source` separated by a blank line. Still
     /// newline-clean because we join logical bodies, not wrapped rows. Wired to
@@ -721,6 +750,31 @@ impl AppState {
 
 }
 
+
+/// Single-step ease helper for display_tok_* fields.
+/// Takes ONE bounded step toward `target` per call — NOT a loop.
+/// gap<70 → +3; gap<200 → ceil(gap*0.15); else +50.  Clamps to target.
+/// If display > target (shouldn't happen normally), reset to target instantly.
+fn ease_display_tok(display: &mut Option<u64>, target: Option<u64>) {
+    if let Some(t) = target {
+        let d = display.get_or_insert(0);
+        if *d < t {
+            let gap = t - *d;
+            let step: u64 = if gap < 70 {
+                3
+            } else if gap < 200 {
+                (gap as f64 * 0.15).ceil() as u64
+            } else {
+                50
+            };
+            *d = (*d + step).min(t);
+        } else if *d > t {
+            // Token counts should only go up during a turn; on a new turn reset instantly.
+            *d = t;
+        }
+    }
+    // If target is None, leave display as-is (None means no data yet).
+}
 
 /// Discover the current git branch under `root` by reading `.git/HEAD` (no
 /// `git` subprocess — fast + dependency-free). Returns the short branch name, or

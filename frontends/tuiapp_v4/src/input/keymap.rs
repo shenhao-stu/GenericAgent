@@ -542,12 +542,34 @@ mod tests {
         assert_eq!(label, i18n::t(app.lang, "copy.label.reply"));
     }
 
-    /// Slice 0 — mouse capture starts ON so crossterm delivers `ScrollUp/ScrollDown`
-    /// and the WHEEL scrolls (the real "can't scroll" fix). The field is the single
-    /// source of truth that `term::setup` (which enables capture) and the
-    /// `Ctrl+Shift+M` opt-OUT toggle both agree with; `Shift+drag` selects while on.
+    /// S1 — mouse capture defaults OFF (NATIVE mode): the terminal does native OS
+    /// drag-select + copy, and the wheel works via EnableAlternateScroll (?1007h →
+    /// arrow keys). `Ctrl+Shift+M` / `/mouse` toggles to INTERACTIVE mode (capture ON,
+    /// click ▸/▾ fold + wheel ScrollUp/Down). This is the Locked Decision from R5.
     #[test]
-    fn mouse_capture_defaults_on() {
-        assert!(AppState::new().mouse_capture, "mouse capture defaults ON so the wheel scrolls");
+    fn mouse_capture_defaults_off_native_mode() {
+        assert!(!AppState::new().mouse_capture, "mouse capture defaults OFF (native mode, S1)");
+    }
+
+    /// S1 — Ctrl+Shift+M toggles mouse_capture from false→true (native→interactive).
+    #[test]
+    fn ctrl_shift_m_toggles_mouse_mode() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use crate::app_event::AppEvent;
+        let mut app = crate::app::AppState::new();
+        assert!(!app.mouse_capture, "starts in native mode (OFF)");
+        let ev = KeyEvent {
+            code: KeyCode::Char('M'),
+            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        cockpit_key(ev, &mut app, 0);
+        // Should have emitted SetMouseCapture(true).
+        let actions = app.drain_actions();
+        assert!(
+            actions.iter().any(|a| matches!(a, AppEvent::SetMouseCapture(true))),
+            "Ctrl+Shift+M emits SetMouseCapture(true): {actions:?}"
+        );
     }
 }

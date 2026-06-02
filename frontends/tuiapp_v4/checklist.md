@@ -1,35 +1,66 @@
-# tui_v4 — Round-4 checklist (LIVE tracker)
+# tui_v4 — Round-5 checklist (LIVE tracker)
 
-> Round 3's all-green claim was a false positive: it verified the finalized/plain path
-> (`--dump-frame` + clean-fixture unit tests), never the live/styled path the user sees.
-> **This round every box ticks only on evidence from the live path** — text fed through
-> `apply_bridge_event`, the **styled** `TestBackend` cell grid scanned, or real key/mouse
-> events driven. A passing unit test on a hand-built fixture is NOT acceptance evidence.
-> Plan: `IMPLEMENTATION_PLAN_R4.md`. Specs: `recon/round4/R1..R6`.
-> Gate per slice = `cargo build` + `cargo test` (0 warn) + the honest check + `VERDICT: PASS`.
-> Baseline (R3 Turn-N source fix already in): **335 passed, 0 failed, 0 warnings**.
-
----
-
-## Slices (DO IN ORDER; halt-on-break)
-
-- [x] **S0 — wheel scroll + Turn-N confirm.** Capture default ON; `mouse_capture_defaults_on`; Shift+drag tip; `wheel_scroll_event_moves_viewport_under_default_capture`; `dashboard_preview_skips_turn_marker_line`; `live_active_turn_marker_leaks_into_styled_frame` green. **+ user real-terminal confirm still pending.**
-- [x] **S1 — model identity on the wire.** `ga_bridge.py llm_identity()` emits `llm`/`model_real` in Ready+Status; protocol/app/reducer parse+store; `ready_then_failover_status_updates_llm_identity` (failover live-updates + `[1m]` stripped). **VERIFIED in `--dump-frame normal`: header shows `codex-pro · gpt-5.5`.**
-- [x] **S2 — multi-line rounded HEADER box.** `render_header` → `BorderType::Rounded` box, `>_ GenericAgent` + model/directory/session rows + `/llm switch`; `HEADER_ROWS=8`. **VERIFIED rendered:** box `╭…╮`/`╰…╯`, `>_ GenericAgent`, `model: codex-pro · gpt-5.5 /llm switch`, `directory:`, `session:` each own row. *Nit:* interior lacks leading-space pad (`│>_` vs `│ >_`) → polish pass.
-- [x] **S3 — tool-call BORDERED BOX (tui_v3).** `render_chip_box`+`push_tool_box`. **VERIFIED rendered:** `╭─ web_scan  ✕ error  ·t1 ──╮` / `│ {"tabs_only": true} │` / `│ 3 tabs scanned · ok │` / `│ !!!Error: SSE overloaded │` / `╰──╯`; `live_tool_call_renders_bordered_box_in_styled_frame`; 4 parity invariants green; click-expand kept.
-- [x] **S4 — spinner animates + effort/ctx.** `render_spinner` glyph = `spinner_style.glyph(tick)` (Braille default); done-line keeps static `⠿`; effort→`非思考模式`/`non-thinking`; ctx via background `on_status` + per-session `context_percent` round-trip; footer llm/model → codex-pro/gpt-5.5. **VERIFIED rendered:** `⠙ Pondering… (…)`; footer `codex-pro · gpt-5.5 · non-thinking · ctx 48% · —`.
-- [x] **S5 — spinner status line + hanging `⎿ Tip:` (CC).** status = `<braille> <gerund>… (elapsed · ↓tokens · thinking <effort>)`, pet removed, width-gated. **VERIFIED rendered:** `⠙ Pondering… (0.1s · ↓1.6k · non-thinking)` then `⎿ Tip: …` directly under, above composer. *Nit:* spinner could read `↓ 1.6k tokens` per user example → polish.
-- [x] **S6 — `/pets` + default Bear + tab title.** `PetStyle::default()==Bear`; picker drops spinner rows; `cmd("pets")` + `alias("emoji"→"pets")`; `terminal_title` = dynamic-pet + session_name + GenericAgent, no NativeClaude. *Evidence:* registry + title tests.
-- [x] **S7 — per-command FX parity + delete `/effects`.** `render_composer` base border = command accent always (not truecolor-gated), like `!`; `live_command_border_restyles_at_mono_like_shell_bang`. **VERIFIED:** `resolve("effects").is_none()`, not in COMMANDS/palette; engine kept.
-- [x] **S8 — `@` completeness vs perf.** `rank_files` returns full ranked list (cap ~500, no 8-cap); dropdown scroll window (`window_slice`) + `… +N more`; deterministic FIFO BFS walk (`VecDeque::pop_front`, per-dir sort), `MAX_INDEXED_FILES` 5000→20000, TTL 5s→30s; `walk_with_cap` testable. *Evidence:* determinism + shallow-vs-deep + scroll-window tests.
-- [x] **S9 — `/continue` search parity (v2).** immediate meta filter split from a debounced (~0.2s, `spinner_tick`) lazy content grep run off the keystroke path via `tick()`; `rel_age` prefix per row; `searching…` hint; `/continue N` form. *Evidence:* two-stage + restore-routing live test; no `ga_bridge.py` change.
-- [x] **S10 — markdown heading clean.** `heading_style` returns Token only (no glyph); `Tag::Heading` drops the prefix span, keeps bold + per-level color. **VERIFIED:** `--dump-frame normal/busy` hash-count = 0; `headings_render_bold_and_colored_without_hashes_in_styled_frame`.
-- [x] **S11 — visual polish nits.** Header interior left-inset 1 col (`│ >_ GenericAgent`); spinner token readout `↓ <count> tokens` (i18n `tokens.unit`), width-gating intact. **VERIFIED rendered:** `│ >_ GenericAgent`, `⠙ Pondering… (0.1s · ↓ 1.6k tokens · non-thinking)`, effort-high → `thinking with medium effort`.
+> Verification rule (unchanged from R4): a box ticks ONLY on evidence from the
+> **live/styled** path — text fed through `apply_bridge_event`, the styled
+> `TestBackend` cell grid scanned, or real key/mouse events. A passing unit test on a
+> hand-built fixture is NOT acceptance. Specs: `recon/round5/R1..R6`. Plan:
+> `IMPLEMENTATION_PLAN_R5.md`.
+> **Result: v0.5.0 — 370 passed / 0 failed / 0 warnings; 4 parity invariants green;
+> release exe built (9.6s); adversarial Monitor (5 Opus verifiers) ALL CONFIRMED.**
 
 ---
 
-## Monitor (final adversarial gate)
-- [x] 4 verifiers (render-based, Sonnet — Opus weekly-limit fallback), citing rendered-frame evidence. **M2/M3/M4: ALL CONFIRMED, zero gaps** (spinner animate+settle, status+hanging tip, footer identity+ctx, tab title, Turn-N absent across 3 shapes × 10 dump scenarios, scroll wiring, 4 parity invariants, budgets, /pets, /effects gone, FX-at-mono, @ window, /continue debounce). **M1: 2 gaps found + CLOSED** — narration `▸` now accent + leading space (` ▸ title`), `cockpit_folds_completed_turn_to_one_line` updated. Final: **354 passed / 0 failed / 0 warnings**.
+## ⚠️ The round-5 incident (write it down)
+A **Sonnet** implementation agent (S3) shipped an **infinite loop** in the new
+`extract_block_math_paragraphs` (`render.rs`): at end-of-input (`i == len`) it did
+`continue` without advancing `i`, spinning the empty trailing chunk forever. Because
+that helper runs on EVERY markdown render, the slice's `cargo test` gate hung; the
+hung test binaries (`tui_v4-<hash>.exe`) pinned the CPU and **froze the user's
+machine**. Fix: `break` at end-of-source (`render.rs:125`). Hardening adopted:
+(1) implementation/finish work moved to **Opus** (user directive — strongest model);
+(2) every later gate runs `timeout … cargo test` so a hang self-kills, never spins;
+(3) one `cargo` at a time. The Monitor compiled a standalone replica of the loop and
+proved it terminates on empty/EOF/no-newline inputs.
 
-## Iteration log
-- **2026-06-01 R4 kickoff** — Recon workflow (R1-R5) + focused agent (R6) wrote 6 specs (1712 lines); the lead found the Turn-N false-positive (expanded bodies keep the marker; tests only checked folded/plain) and the wheel-scroll blind spot (capture-off kills wheel). R3 agent applied the Turn-N source fix + 3 styled-frame E2E tests. Baseline re-confirmed **335 passed / 0 failed / 0 warnings**. `IMPLEMENTATION_PLAN_R4.md` written (11 slices). Implementation workflow dispatched.
+## Slices (all DONE, gate = build + test 0/0 + live honest-check + Monitor)
+
+- [x] **S1 — mouse TOGGLE model + click expand/collapse ▸/▾.** Default = NATIVE
+  (`term.rs`: no `EnableMouseCapture`, `EnableAlternateScroll`=`?1007h` → native OS
+  drag-select + wheel-as-arrows, the Codex model); `/mouse` + `Ctrl+Shift+M` toggle
+  capture ON for click-fold/wheel; footer shows `mouse: select`/`mouse: click`.
+  `FoldSegment::Text{turn}` + a ` ▾ <title>` header tagged `NodeId::Turn` for expanded
+  turns (re-collapsible); full-width hit-zone for `NodeId::Tool`. Same `NodeId::Turn`
+  drives ` ▸ `(folded) ⇄ ` ▾ `(expanded). *Tests:* `expanded_turn_has_downward_triangle_header_and_can_be_recollapsed`, `expanded_tool_box_affordance_row_is_clickable_at_interior_col`. **Monitor M1 CONFIRMED.**
+- [x] **S2 — blank-gap bottom-anchor.** `transcript.rs render_transcript` renders into
+  a sub-rect at `y+gap` when `following() && total < height` so content sits flush above
+  the spinner; scrolled-up/overflow paths provably un-shoved. *Test:* `blank_gap_bottom_anchor_live_path` (gap==0, `╰─╯` present). **Monitor M3 CONFIRMED.**
+- [x] **S3 — markdown.** Table phantom-column removed (TableHead/TableRow double-push);
+  H1–H6 distinct by **modifier+color, NO bare `#`** (round-4 rule kept — FIX-B's hash
+  prefix reverted); blockquote SoftBreak→newline (scoped to `quote_depth>0`); width-aware
+  HR; **LaTeX `\,` pre-scan** (`extract_block_math_paragraphs`, the loop now `break`s at
+  EOF); nested-list spurious blank fixed (`TagEnd::Item` flushes only with content).
+  *Tests:* `table_no_phantom_column`, `heading_levels_are_visually_distinct`, `blockquote_two_lines_render_as_two_rows`, `block_math_thin_space_not_corrupted`, `nested_list_no_spurious_blank` + the two styled-frame heading tests. **Monitor M2 CONFIRMED.**
+- [x] **S4 — spinner `↑in · ↓out` (eased) + `└` tip.** `render_spinner` shows BOTH
+  arrows from `display_tok_in/out`, eased toward `tok_in/tok_out` in `tick()` (single
+  bounded step, NOT a loop); `⎿`→`└` in `render_tips`. ctx% LEFT truthful (the
+  `context_win*3` denominator matches GA's real trim trigger — NOT a bug; not touched).
+  Stale ↓-only / `⎿` tests rewritten. *Tests:* `spinner_shows_both_up_and_down_arrows`, `tip_rows_use_floor_corner_glyph`, `display_tok_eases_toward_target_on_tick`. **Monitor M4 CONFIRMED.**
+- [x] **S5 — unified `/emoji` (braille/bear/cat pick-one) + animated tab + `/pets` gone.**
+  `CompanionKind { Spinner(SpinnerStyle), Pet(PetStyle) }` replaces the two fields; one
+  9-row picker (3 spinner ids 100-102 + 5 pet + Off); selection drives the spinner LEAD
+  glyph AND the tab; `terminal_title` animates (`spinner_tick / PET_TICKS_PER_FRAME`);
+  `/pets` removed (was a separate cmd, `/emoji` now primary). *Test:* `emoji_unified_picker_and_animated_title`. **Monitor M4 CONFIRMED.** *(The half-applied migration from the stopped Sonnet run was finished on Opus.)*
+- [x] **S6 — sticky last-user-prompt header on scroll.** `last_user_source_first_line()`
+  + a `sticky_header: Option<Rect>` slot (`Length(1)` above the transcript, only when
+  `!following && a prompt exists`) → dim `UserBand` `↑ <prompt…>`. *Test:* `sticky_header_shows_when_scrolled_up_absent_when_following`. **Monitor M5 CONFIRMED.**
+- [x] **S7 — `/keybindings` doc clarity.** Added `Ctrl+G` (stash, moved from `Ctrl+S`) +
+  confirmed the v3→v4 remaps (`Ctrl+Shift+O` fold, `Ctrl+O` copy, `Ctrl+S` dashboard,
+  `Ctrl+B` branch, `Ctrl+Shift+M`/`/mouse` mode + native-select hint) are all listed.
+  *Test:* `keybindings_overlay_lists_v3_to_v4_remaps`. **Monitor M1 CONFIRMED.**
+
+## Monitor (adversarial, render-based, 5 Opus verifiers)
+- [x] **M1 mouse+fold · M2 markdown · M3 blank-gap · M4 spinner+emoji · M5 sticky+CPU-safety — ALL CONFIRMED, zero gaps.** M5 (the user's top concern) proved loop safety: suite finishes **1.39s**, every round-5 `while` provably advances/breaks (EOF-`break` at render.rs:125 + a compiled replica hammered on empty/EOF inputs), and **0** `tui_v4`/`cargo`/`rustc` processes leak.
+
+## Pending (user's call)
+- [ ] Commit / push / release v0.5.0 — NOT done (no authorization this round; awaiting user).
+- [ ] Live aesthetic confirmation (native select+copy feel in the user's terminal; per-command FX colors).

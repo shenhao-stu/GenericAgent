@@ -163,6 +163,9 @@ impl FrameSink for AppState {
         // A new turn starts → retire the previous turn's frozen done-line (Q7) so it
         // only ever shows in the idle gap BETWEEN turns, never bleeding into one.
         self.last_turn_ms = None;
+        // Reset eased display counters so each new turn ramps fresh from zero.
+        self.display_tok_in = None;
+        self.display_tok_out = None;
         let id = self.alloc_block_id();
         self.transcript
             .push(Block::new(id, Some(mid), Role::from_proto(&role), String::new(), false));

@@ -1,5 +1,5 @@
 //! cockpit/footer.rs — the bottom chrome rows: the two below-composer rows (row1
-//! runtime session info, row2 `⎿ Tips`), the rainbow separator, the busy spinner
+//! runtime session info, row2 `└ Tips`), the rainbow separator, the busy spinner
 //! band, and the frozen above-composer done-line.
 
 use ratatui::layout::Rect;
@@ -34,7 +34,7 @@ pub(crate) fn render_separator(frame: &mut Frame, area: Rect, app: &AppState, th
 
 /// SPINNER status line (only when busy), CC `SpinnerAnimationRow` composition:
 /// `<glyph> <Gerund>… (<elapsed> · ↓ <tokens> tokens · thinking <effort>)`. The leading
-/// glyph ANIMATES — it cycles `app.spinner_style`'s frames at the 0.1s `tick`
+/// glyph ANIMATES — it cycles `app.companion`'s frames at the 0.1s `tick`
 /// (default braille `⠋⠙⠹…`); the done-line (`render_done_line`) keeps the static
 /// `⠿`, and busy/done are mutually exclusive so the spinner settles on `⠿` when the
 /// turn ends. NO emoji pet here — the pet lives in the tab title; the spinner is
@@ -48,7 +48,9 @@ pub(crate) fn render_separator(frame: &mut Frame, area: Rect, app: &AppState, th
 pub(crate) fn render_spinner(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, now_ms: u64) {
     let elapsed = app.turn_elapsed_ms(now_ms);
     let tick = (now_ms / 100) as u64;
-    let glyph = app.spinner_style.glyph(tick);
+    // The lead is the unified /emoji companion: a spinner glyph (braille/arc/pulse)
+    // OR a pet face (bear/cat/…), animated at `tick`. Returns a String either way.
+    let glyph = app.companion.spinner_lead(elapsed, tick);
     let mut heat_style = Style::default().fg(theme.color(heat_token(elapsed)));
     if heat_bold(elapsed) {
         heat_style = heat_style.add_modifier(Modifier::BOLD);
@@ -72,7 +74,18 @@ pub(crate) fn render_spinner(frame: &mut Frame, area: Rect, app: &AppState, them
             Span::styled(format!("{secs:.1}s"), dim),
         ];
         if with_tokens {
-            if let Some(tokens) = app.tokens {
+            let has_split = app.tok_in.is_some() || app.tok_out.is_some();
+            if has_split {
+                // Use eased display values (smoothly animated toward the live targets).
+                // Fall back to the live tok_in/tok_out if display is None (first tick).
+                let di = app.display_tok_in.unwrap_or_else(|| app.tok_in.unwrap_or(0));
+                let dout = app.display_tok_out.unwrap_or_else(|| app.tok_out.unwrap_or(0));
+                g.push(Span::styled(" · ↑ ".to_string(), dim));
+                g.push(Span::styled(human_count(di), text));
+                g.push(Span::styled(" · ↓ ".to_string(), dim));
+                g.push(Span::styled(human_count(dout), text));
+            } else if let Some(tokens) = app.tokens {
+                // Legacy fallback: bridge sent only a total, no split.
                 g.push(Span::styled(" · ↓ ".to_string(), dim));
                 g.push(Span::styled(human_count(tokens), text));
                 g.push(Span::styled(format!(" {}", crate::i18n::t(app.lang, "tokens.unit")), dim));
@@ -163,6 +176,12 @@ pub(crate) fn render_session_info(frame: &mut Frame, area: Rect, app: &AppState,
         sep(),
         Span::styled(branch.to_string(), Style::default().fg(theme.color(Token::Suggestion))),
     ];
+    // S1: Mouse mode indicator — dim, so it's discoverable but not distracting.
+    // "mouse: select" in native mode (drag to copy); "mouse: click" in interactive.
+    let mouse_label = if app.mouse_capture { "mouse: click" } else { "mouse: select" };
+    spans.push(sep());
+    spans.push(Span::styled(mouse_label.to_string(), dim));
+
     // The connection chip lives on this row's tail (it owns the bottom chrome now
     // that the footer is gone) so a failed bridge stays visible (N1).
     if !matches!(app.conn, ConnStatus::Connected { .. }) {
@@ -177,8 +196,8 @@ pub(crate) fn render_session_info(frame: &mut Frame, area: Rect, app: &AppState,
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// ROW 2 (below the composer, Q7): `⎿ Tips` — the rotating tip (deterministic by
-/// tick) under a `⎿` leader glyph (the rounded `└`, restored from v2/v3). While the
+/// ROW 2 (below the composer, Q7): `└ Tips` — the rotating tip (deterministic by
+/// tick) under a `└` leader glyph (U+2514, BOX DRAWINGS LIGHT UP AND RIGHT). While the
 /// 3-stage Ctrl+C is ARMED (§8) the row instead shows the "press Ctrl+C again to
 /// quit" hint in `Token::Warning` (a transient override that vanishes when the 2s
 /// arm expires) — never a transcript notice.
@@ -192,7 +211,7 @@ pub(crate) fn render_tips(frame: &mut Frame, area: Rect, app: &AppState, theme: 
     };
     let body = clip_to(body_src, (area.width as usize).saturating_sub(2));
     let spans = vec![
-        Span::styled("⎿ ".to_string(), dim),
+        Span::styled("└ ".to_string(), dim),
         Span::styled(body, body_style),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -204,7 +223,7 @@ mod tests {
     use crate::bridge::protocol::CoreToUi;
     use crate::bridge::BridgeEvent;
     use crate::components::render;
-    use crate::flavor::{PetStyle, SpinnerStyle};
+    use crate::flavor::{CompanionKind, SpinnerStyle};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -305,7 +324,7 @@ mod tests {
     /// tests. The pet is turned OFF so the spinner LEAD cell is the bare glyph.
     fn busy_spinner_rows_at(tok_in: u64, tok_out: u64, now_ms: u64) -> Vec<String> {
         let mut app = AppState::new();
-        app.pet_style = PetStyle::Off;
+        app.companion = CompanionKind::Spinner(SpinnerStyle::Braille);
         app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
         app.model = Some("m".into());
         app.apply_bridge_event(
@@ -360,23 +379,25 @@ mod tests {
         }
     }
 
-    /// Slice 5: the spinner's `↓ <tokens> tokens` readout (CC's per-turn token arrow)
-    /// reflects the LIVE count — a later `Status` frame with a different total
-    /// changes what the row shows (the spinner reads `app.tokens` directly, it does
-    /// not cache it). The `↑in` / `ctx` parts are no longer on the spinner line.
+    /// Slice 4: the spinner shows BOTH `↑ <in>` and `↓ <out>` arrows when the
+    /// bridge sends split tok_in/tok_out, reflecting the live per-call counts.
+    /// A different Status snapshot yields a different readout (not cached).
     #[test]
     fn spinner_token_readout_reflects_live_counts() {
-        // Seeded total 1234+340=1574 → human-compacted to `1.6k` after the `↓ `, with
-        // the trailing `tokens` word (Slice 11 wording).
+        // Seeded tok_in=1234 (→ "1.2k") and tok_out=340.
+        // display_tok_* start at None → first render falls back to tok_in/tok_out directly.
         let rows = busy_spinner_rows(1234, 340);
         let spinner = find_spinner_row(&rows);
-        assert!(spinner.contains("↓ 1.6k tokens"), "live token total: {spinner:?}");
-        assert!(!spinner.contains('↑'), "no `↑in` on the spinner line: {spinner:?}");
+        assert!(spinner.contains('↑'), "spinner must contain ↑ input arrow: {spinner:?}");
+        assert!(spinner.contains('↓'), "spinner must contain ↓ output arrow: {spinner:?}");
+        assert!(spinner.contains("↑ 1.2k"), "input token count 1234→1.2k: {spinner:?}");
+        assert!(spinner.contains("↓ 340"), "output token count 340: {spinner:?}");
 
         // A DIFFERENT Status snapshot yields a DIFFERENT readout (not cached).
         let rows2 = busy_spinner_rows(48_300, 12_900);
         let spinner2 = find_spinner_row(&rows2);
-        assert!(spinner2.contains("↓ 61.2k tokens"), "live token total updates: {spinner2:?}");
+        assert!(spinner2.contains("↑ 48.3k"), "input count 48300→48.3k: {spinner2:?}");
+        assert!(spinner2.contains("↓ 12.9k"), "output count 12900→12.9k: {spinner2:?}");
         assert_ne!(spinner, spinner2, "the readout tracks the live count");
     }
 
@@ -431,20 +452,20 @@ mod tests {
         assert!(!info.contains("MixinSession"), "router name is NOT shown: {info:?}");
     }
 
-    /// Slice 5 layout INVERSION (was `below_composer_has_two_rows`): the `⎿ Tip`
+    /// Slice 5 layout INVERSION (was `below_composer_has_two_rows`): the `└ Tip`
     /// hangs as a corner-continuation directly UNDER the busy spinner status line
     /// (above the composer), so below the composer there is now exactly ONE row
     /// (session info). IDLE keeps the historical two-row below-composer layout.
     #[test]
     fn busy_tip_under_spinner_one_row_below_composer() {
-        // BUSY: spinner band on, the `⎿` Tip is its very next row (above composer).
+        // BUSY: spinner band on, the `└` Tip is its very next row (above composer).
         let rows = busy_spinner_rows(1234, 340);
         let spinner_idx = rows
             .iter()
             .position(|r| r.contains('…') && r.contains('('))
             .expect("the spinner status row");
         let tip = &rows[spinner_idx + 1];
-        assert!(tip.starts_with("⎿ "), "the row under the spinner is the `⎿ ` tip: {tip:?}");
+        assert!(tip.starts_with("└ "), "the row under the spinner is the `└ ` tip: {tip:?}");
 
         // The Tip is ABOVE the composer (its bottom `╰` border comes after it), and
         // below the composer there is exactly ONE row (session info).
@@ -452,10 +473,10 @@ mod tests {
             .iter()
             .rposition(|r| r.starts_with('╰'))
             .expect("the composer has a bottom border");
-        assert!(spinner_idx + 1 < bottom, "the `⎿` tip sits above the composer");
+        assert!(spinner_idx + 1 < bottom, "the `└` tip sits above the composer");
         assert_eq!(bottom + 2, rows.len(), "exactly ONE row follows the composer while busy");
-        // The sole below-composer row is the session info, NOT a second `⎿` tip.
-        assert!(!rows[bottom + 1].starts_with("⎿ "), "no detached below-composer tip while busy");
+        // The sole below-composer row is the session info, NOT a second `└` tip.
+        assert!(!rows[bottom + 1].starts_with("└ "), "no detached below-composer tip while busy");
         assert!(
             !rows.iter().any(|r| r.contains("❯ chat")),
             "no `❯ chat` anywhere in the chrome"
@@ -471,7 +492,7 @@ mod tests {
             .rposition(|r| r.starts_with('╰'))
             .expect("the composer has a bottom border");
         assert_eq!(idle_bottom + 3, idle_rows.len(), "two rows follow the composer when idle");
-        assert!(idle_rows[idle_bottom + 2].starts_with("⎿ "), "row2 is the `⎿ ` tip when idle");
+        assert!(idle_rows[idle_bottom + 2].starts_with("└ "), "row2 is the `└ ` tip when idle");
     }
 
     /// Slice 5 HONEST CHECK: the busy spinner status row matches CC's
@@ -482,7 +503,7 @@ mod tests {
     fn spinner_status_line_shape_with_thinking_effort() {
         use crate::app::effort::ReasoningEffort;
         let mut app = AppState::new();
-        app.pet_style = PetStyle::Off;
+        app.companion = CompanionKind::Spinner(SpinnerStyle::Braille);
         app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
         app.model = Some("m".into());
         app.set_reasoning_effort(ReasoningEffort::Max);
@@ -508,20 +529,22 @@ mod tests {
         let rows = cockpit_rows(&mut app, 100, 30);
         let spinner = find_spinner_row(&rows);
 
-        // Shape: an open paren, a `·`-separated `↓<tokens>`, and the "thinking …"
+        // Shape: an open paren, `↑ <in> · ↓ <out>` split arrows, and the "thinking …"
         // phrase, all inside the `(…)` group.
         assert!(spinner.contains('('), "status group opens with `(`: {spinner:?}");
         assert!(spinner.contains("0.0s"), "elapsed is present: {spinner:?}");
-        assert!(spinner.contains("· ↓ 1.6k tokens"), "down-arrow token total: {spinner:?}");
+        // New S4 shape: split ↑/↓ arrows instead of single ↓ total.
+        assert!(spinner.contains('↑'), "spinner must have ↑ input arrow: {spinner:?}");
+        assert!(spinner.contains('↓'), "spinner must have ↓ output arrow: {spinner:?}");
+        assert!(spinner.contains("↑ 1.2k"), "input token count 1234→1.2k: {spinner:?}");
+        assert!(spinner.contains("↓ 340"), "output token count 340: {spinner:?}");
         assert!(spinner.contains("· thinking with max effort"), "thinking phrase: {spinner:?}");
         assert!(spinner.trim_end().ends_with(')'), "status group closes with `)`: {spinner:?}");
-        // No ctx bar / `↑in` on the spinner line (moved off per Slice 5).
-        assert!(!spinner.contains('↑'), "no `↑in`: {spinner:?}");
         assert!(!spinner.contains('▰') && !spinner.contains('▱'), "no ctx bar: {spinner:?}");
 
-        // The next row is the hanging `⎿ ` tip continuation.
+        // The next row is the hanging `└ ` tip continuation.
         let idx = rows.iter().position(|r| r.contains('…') && r.contains('(')).unwrap();
-        assert!(rows[idx + 1].starts_with("⎿ "), "next row is the `⎿ ` tip: {:?}", rows[idx + 1]);
+        assert!(rows[idx + 1].starts_with("└ "), "next row is the `└ ` tip: {:?}", rows[idx + 1]);
     }
 
     /// Slice 5 width-gating (R5): on a NARROW terminal the tokens part drops FIRST,
@@ -530,7 +553,7 @@ mod tests {
     fn spinner_width_gating_drops_tokens_first() {
         use crate::app::effort::ReasoningEffort;
         let mut app = AppState::new();
-        app.pet_style = PetStyle::Off;
+        app.companion = CompanionKind::Spinner(SpinnerStyle::Braille);
         app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
         app.model = Some("m".into());
         app.set_reasoning_effort(ReasoningEffort::Max);
@@ -553,11 +576,13 @@ mod tests {
             }),
             0,
         );
-        // 36-wide: too narrow for `… (0.0s · ↓1.6k · thinking with max effort)` in
-        // full, so the tokens part is dropped but the thinking phrase remains.
+        // 36-wide: too narrow for `… (0.0s · ↑ 1.2k · ↓ 340 · thinking with max effort)`
+        // in full, so the whole tokens part (both ↑ and ↓) is dropped first but the
+        // elapsed + thinking phrase stay legible.
         let rows = cockpit_rows(&mut app, 36, 12);
         let spinner = find_spinner_row(&rows);
-        assert!(!spinner.contains("↓"), "tokens part dropped on narrow: {spinner:?}");
+        assert!(!spinner.contains('↑'), "↑ tokens dropped on narrow: {spinner:?}");
+        assert!(!spinner.contains('↓'), "↓ tokens dropped on narrow: {spinner:?}");
         assert!(spinner.contains("0.0s"), "elapsed kept on narrow: {spinner:?}");
         assert!(spinner.contains("thinking"), "thinking phrase kept on narrow: {spinner:?}");
     }
@@ -573,7 +598,7 @@ mod tests {
 
         let (w, h) = (100u16, 30u16);
         let rows = cockpit_rows(&mut app, w, h);
-        // Row1 (just above the `⎿` tip row, i.e. the last-but-one row) carries the
+        // Row1 (just above the `└` tip row, i.e. the last-but-one row) carries the
         // disconnect chip — the reason text from the child exit is shown (N1).
         let last = rows.len() - 1;
         let row1 = &rows[last - 1];
@@ -581,5 +606,74 @@ mod tests {
             row1.contains("disconnected") || row1.contains("code 1"),
             "the disconnect chip is folded onto row1's tail: {row1:?}"
         );
+    }
+
+    // ---- S4 HONEST CHECKS (LIVE/STYLED path) --------------------------------
+
+    /// HC-1: Spinner shows both `↑ <in>` and `↓ <out>` arrows (LIVE styled path).
+    /// The seeded tok_in=1234 (→ "1.2k") and tok_out=340 must both be visible with
+    /// their respective arrows. display_tok_* start None so the first render falls
+    /// back to tok_in/tok_out directly (no easing yet until tick() is called).
+    #[test]
+    fn spinner_shows_both_up_and_down_arrows() {
+        let rows = busy_spinner_rows(1234, 340);
+        let spinner = find_spinner_row(&rows);
+        // BOTH arrows present.
+        assert!(spinner.contains('↑'), "spinner must contain ↑ input arrow: {spinner:?}");
+        assert!(spinner.contains('↓'), "spinner must contain ↓ output arrow: {spinner:?}");
+        // ↑ shows the input count (1234 → "1.2k").
+        assert!(spinner.contains("↑ 1.2k"), "input token count: {spinner:?}");
+        // ↓ shows the output count (340).
+        assert!(spinner.contains("↓ 340"), "output token count: {spinner:?}");
+    }
+
+    /// HC-2: Tip rows use `└ ` leader, never `⎿` (LIVE styled path). Both the
+    /// busy hanging tip (directly under the spinner) AND the idle row-2 tip below
+    /// the composer must use the U+2514 corner glyph.
+    #[test]
+    fn tip_rows_use_floor_corner_glyph() {
+        // Busy: hanging tip under spinner.
+        let rows = busy_spinner_rows(1234, 340);
+        let spinner_idx = rows
+            .iter()
+            .position(|r| r.contains('…') && r.contains('('))
+            .expect("the busy spinner status row");
+        let tip = &rows[spinner_idx + 1];
+        assert!(tip.starts_with("└ "), "busy hanging tip must use └: {tip:?}");
+        assert!(!tip.starts_with('⎿'), "must NOT use ⎿: {tip:?}");
+
+        // Idle: row2 tip below composer.
+        let mut idle = AppState::new();
+        idle.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
+        idle.model = Some("m".into());
+        let idle_rows = cockpit_rows(&mut idle, 100, 30);
+        let last = idle_rows[idle_rows.len() - 1].clone();
+        assert!(last.starts_with("└ "), "idle tip row2 must use └: {last:?}");
+        assert!(!last.starts_with('⎿'), "must NOT use ⎿: {last:?}");
+    }
+
+    /// HC-3: Eased display values advance toward target on each tick() call (no
+    /// loop — each tick is a single bounded step). After many ticks they converge.
+    #[test]
+    fn display_tok_eases_toward_target_on_tick() {
+        let mut app = AppState::new();
+        // Seed tok_in/tok_out targets.
+        app.tok_in = Some(5000);
+        app.tok_out = Some(1000);
+        // display_tok* start as None.
+        assert!(app.display_tok_in.is_none());
+        assert!(app.display_tok_out.is_none());
+        // First tick: initializes display (gap=5000 → step=50; gap=1000 → step=50).
+        app.tick();
+        let d_in = app.display_tok_in.expect("display_tok_in set after first tick");
+        let d_out = app.display_tok_out.expect("display_tok_out set after first tick");
+        assert!(d_in > 0 && d_in < 5000, "display_tok_in started easing: {d_in}");
+        assert!(d_out > 0 && d_out < 1000, "display_tok_out started easing: {d_out}");
+        // After enough ticks, converges to target.
+        for _ in 0..200 {
+            app.tick();
+        }
+        assert_eq!(app.display_tok_in, Some(5000), "converges to tok_in");
+        assert_eq!(app.display_tok_out, Some(1000), "converges to tok_out");
     }
 }

@@ -39,7 +39,7 @@ use app_event::AppEvent;
 use bridge::{BridgeEvent, BridgeOptions};
 use theme::Theme;
 
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.5.0";
 
 /// The full terminal area (origin `(0,0)`, current size) — what `frame.area()`
 /// reports for a fullscreen viewport. Read BEFORE `terminal.draw` so the loop can

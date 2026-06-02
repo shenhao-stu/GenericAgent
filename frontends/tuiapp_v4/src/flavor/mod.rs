@@ -411,18 +411,78 @@ pub fn pet_face(style: PetStyle, elapsed_ms: u64, frame: u64) -> &'static str {
 }
 
 /// Number of 0.1s ticks per pet-frame step (~0.5s cadence; tui_v3 `_spin//5`).
-/// Reserved for the heat-aware tab-title face (Slice 6): the spinner status line no
-/// longer carries a pet (braille-only), so the blinking-face helper has no live
-/// caller until the tab title adopts it.
-#[allow(dead_code)]
 pub const PET_TICKS_PER_FRAME: u64 = 5;
 
 /// The pet face for the 0.1s tick clock — convenience over [`pet_face`] that
-/// applies the `/5` cadence (a ~0.5s blink). Reserved for the Slice-6 tab-title
-/// face (the spinner is braille-only now); kept + unit-tested for that consumer.
+/// applies the `/5` cadence (a ~0.5s blink).
 #[allow(dead_code)]
 pub fn pet(style: PetStyle, elapsed_ms: u64, tick: u64) -> &'static str {
     pet_face(style, elapsed_ms, tick / PET_TICKS_PER_FRAME)
+}
+
+// ---------------------------------------------------------------------------
+// CompanionKind — unified /emoji selection (Slice S5).
+// ---------------------------------------------------------------------------
+
+/// The unified `/emoji` selection: a spinner style (braille/arc/pulse)
+/// OR a pet style (bear/cat/dot/unicode/fox/off). These are mutually
+/// exclusive — picking one variant sets the other to its neutral value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionKind {
+    Spinner(SpinnerStyle),
+    Pet(PetStyle),
+}
+
+impl Default for CompanionKind {
+    fn default() -> Self {
+        CompanionKind::Pet(PetStyle::Bear)
+    }
+}
+
+#[allow(dead_code)] // pet_style/display_name are kept API for future call-sites (picker labels, status line).
+impl CompanionKind {
+    /// Returns the effective SpinnerStyle to use in render_spinner.
+    /// Pet variants fall back to SpinnerStyle::Braille (the tui_v3 soul).
+    pub fn spinner_style(self) -> SpinnerStyle {
+        match self {
+            CompanionKind::Spinner(s) => s,
+            CompanionKind::Pet(_) => SpinnerStyle::Braille,
+        }
+    }
+
+    /// Returns the effective PetStyle for the tab title face.
+    /// Spinner variants use PetStyle::Off (no face in the tab title).
+    pub fn pet_style(self) -> PetStyle {
+        match self {
+            CompanionKind::Pet(p) => p,
+            CompanionKind::Spinner(_) => PetStyle::Off,
+        }
+    }
+
+    /// The lead glyph (as String) for the spinner status line at a given tick.
+    /// For a pet variant this IS the pet face (at the /5 cadence);
+    /// for a spinner variant it is the animated spinner character.
+    pub fn spinner_lead(self, elapsed_ms: u64, tick: u64) -> String {
+        match self {
+            CompanionKind::Spinner(s) => s.glyph(tick).to_string(),
+            CompanionKind::Pet(p) => {
+                let face = pet_face(p, elapsed_ms, tick / PET_TICKS_PER_FRAME);
+                if face.is_empty() {
+                    SpinnerStyle::Braille.glyph(tick).to_string()
+                } else {
+                    face.to_string()
+                }
+            }
+        }
+    }
+
+    /// Display name for the picker.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            CompanionKind::Spinner(s) => s.name(),
+            CompanionKind::Pet(p) => p.name(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -116,7 +116,17 @@ pub fn default_turn_folded(is_last: bool, fold_all: bool) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FoldSegment {
     /// Prose / the final (expanded) turn body — rendered in full.
-    Text { body: String },
+    ///
+    /// `turn` is `Some(n)` when this text came from a known turn marker (the
+    /// 1-based turn number). `None` for the pre-marker preamble or a whole-
+    /// message text where no turn markers were found. The renderer uses this to
+    /// emit a `▾` collapse header (tagged `NodeId::Turn`) for expanded non-
+    /// preamble turns so click-to-collapse works (S1 Fix B).
+    Text {
+        body: String,
+        /// The 1-based turn number, or `None` for the preamble / single-turn text.
+        turn: Option<u32>,
+    },
     /// A completed, FOLDED turn — rendered as a single `▸ <title>` header. The
     /// full `body` replays when the fold is toggled open (Ctrl+O).
     Fold {
@@ -138,6 +148,11 @@ impl FoldSegment {
             FoldSegment::Text { .. } => None,
         }
     }
+}
+
+/// Make `turn_title` accessible to the renderer for generating ▾ headers.
+pub(crate) fn turn_title_pub(body: &str) -> String {
+    turn_title(body)
 }
 
 /// Split assistant `text` into fold/text segments, folding every COMPLETED turn
@@ -176,6 +191,7 @@ pub fn fold_turns_with(
     if markers.is_empty() {
         return vec![FoldSegment::Text {
             body: text.to_string(),
+            turn: None,
         }];
     }
     // With a single turn marker the incremental fold needs nothing folded UNLESS the
@@ -183,8 +199,10 @@ pub fn fold_turns_with(
     if markers.len() < 2 {
         let only = markers[0];
         if !fold_all && !is_folded(only.number, true) {
+            // Single expanded turn: carry its turn number so the renderer can emit ▾.
             return vec![FoldSegment::Text {
                 body: text.to_string(),
+                turn: Some(only.number),
             }];
         }
         // else: fall through and let the loop fold it (preamble + the folded turn).
@@ -192,13 +210,14 @@ pub fn fold_turns_with(
 
     let mut segs: Vec<FoldSegment> = Vec::new();
 
-    // Preamble before the first marker (turn 0) — prose, kept as text.
+    // Preamble before the first marker (turn 0) — prose, kept as text with turn=None.
     let first = markers[0];
     if first.start > 0 {
         let pre = &text[..first.start];
         if !pre.trim().is_empty() {
             segs.push(FoldSegment::Text {
                 body: pre.to_string(),
+                turn: None, // preamble: no turn number
             });
         }
     }
@@ -221,8 +240,10 @@ pub fn fold_turns_with(
                 body: body.to_string(),
             });
         } else {
+            // Expanded turn: carry its turn number for the ▾ collapse header.
             segs.push(FoldSegment::Text {
                 body: body.to_string(),
+                turn: Some(m.number),
             });
         }
     }
@@ -710,7 +731,7 @@ still working on it";
             Some("▸ Read the config and found the port")
         );
         // The final (in-progress) turn is present as expanded text.
-        assert!(segs.iter().any(|s| matches!(s, FoldSegment::Text { body } if body.contains("still working on it"))));
+        assert!(segs.iter().any(|s| matches!(s, FoldSegment::Text { body, .. } if body.contains("still working on it"))));
 
         // A single-turn (or no-marker) text does NOT fold (needs ≥2 turns).
         let one = fold_turns("Turn 1 ...\n<summary>only turn</summary>\nbody", false);
@@ -777,7 +798,7 @@ still working on it";
         let text = "pre\nTurn 1 ...\nbody\n**LLM Running (Turn 2) ...**\nmore";
         let segs = fold_turns(text, false);
         // The preamble "pre" is its own text segment.
-        assert!(matches!(&segs[0], FoldSegment::Text { body } if body.contains("pre")));
+        assert!(matches!(&segs[0], FoldSegment::Text { body, .. } if body.contains("pre")));
         // Turn 1 folds (number 1); turn 2 stays expanded.
         assert!(segs.iter().any(|s| matches!(s, FoldSegment::Fold { turn: 1, .. })));
     }
