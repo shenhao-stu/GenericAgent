@@ -46,6 +46,20 @@ def _first_user(pairs):
     return ''
 
 
+def _last_user(text):
+    """Last real user prompt. Scans `=== Prompt ===` blocks directly (no
+    Prompt/Response pairing, so response-less/aborted sessions still preview),
+    newest-first, returning the first one `_user_text` accepts (it drops
+    tool_result continuations + all _INJECT_MARKERS). Better preview anchor than
+    the first prompt — reflects what the session was most recently about."""
+    for label, body in reversed(_BLOCK_RE.findall(text or '')):
+        if label == 'Prompt':
+            t = _user_text(body)
+            if t:
+                return t
+    return ''
+
+
 def _last_summary(pairs):
     for _, response_body in reversed(pairs):
         try:
@@ -173,12 +187,20 @@ def _preview_from_file(path):
                 fh.seek(-_PREVIEW_WIN, 2); tail = fh.read()
     except OSError: return ''
     tail_s = tail.decode('utf-8', errors='replace')
-    m = _SUMMARY_RE.findall(tail_s)
-    if m: return m[-1].strip()
-    for line in head.decode('utf-8', errors='replace').splitlines():
-        s = line.strip()
-        if s and not s.startswith('===') and not s.startswith('###') and '<history>' not in s:
+    # Use only the latest <summary>, and reject it if dirty. Models sometimes emit
+    # an unclosed <summary>, so the non-greedy DOTALL match pairs it with a far-away
+    # </summary> and swallows === block headers / JSON across rounds. Treat such a
+    # match as invalid and fall through to the last user prompt (don't dig older ones).
+    cands = _SUMMARY_RE.findall(tail_s)
+    if cands:
+        s = ' '.join(cands[-1].split())
+        if s and '=== ' not in s and '"role"' not in s and len(s) <= 200:
             return s
+    # Summary invalid/absent -> last real user prompt (JSON-aware, skips anchors;
+    # scans Prompt blocks directly so response-less sessions still preview).
+    lu = _last_user(tail_s) or _last_user(head.decode('utf-8', errors='replace'))
+    if lu:
+        return ' '.join(lu.split())[:120]
     return ''
 
 

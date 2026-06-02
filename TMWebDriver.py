@@ -29,7 +29,7 @@ class Session:
         self.connect_at = time.time()
         self.disconnect_at = None
     def mark_disconnected(self):
-        if self.is_active(): print(f"Tab disconnected: {self.url} (Session: {self.id})")
+        if self.disconnect_at is None: print(f"Tab disconnected: {self.url} (Session: {self.id})")
         self.disconnect_at = time.time()
 
 
