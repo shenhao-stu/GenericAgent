@@ -85,6 +85,14 @@ pub enum CoreToUi {
         model_real: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_percent: Option<f64>,
+        /// Raw context-window char counts (additive; mirror ga_bridge's
+        /// `current_input_chars` / `context_window_chars`). They drive the footer's
+        /// `ctx` fill bar + `Nk/Mk` readout — the HONEST GA trim metric is CHARS,
+        /// not tokens. Both serde-default None so an older bridge still parses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_used: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_limit: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -387,6 +395,8 @@ mod tests {
                 llm: None,
                 model_real: None,
                 context_percent: None,
+                context_used: None,
+                context_limit: None,
                 tokens: None,
                 input_tokens: None,
                 output_tokens: None,
@@ -400,7 +410,7 @@ mod tests {
         // The full token snapshot the bridge emits mid-turn + before MessageEnd
         // (the /cost-wiring payload). Confirms the additive fields round-trip.
         let status_full = CoreToUi::parse_line(
-            r#"{"type":"Status","model":"glm","llm":"codex-pro","model_real":"gpt-5.5","context_percent":42.5,"tokens":1550,"input_tokens":1200,"output_tokens":350,"cache_tokens":90,"last_input":800,"last_output":120}"#,
+            r#"{"type":"Status","model":"glm","llm":"codex-pro","model_real":"gpt-5.5","context_percent":42.5,"context_used":85000,"context_limit":200000,"tokens":1550,"input_tokens":1200,"output_tokens":350,"cache_tokens":90,"last_input":800,"last_output":120}"#,
         )
         .unwrap();
         assert_eq!(
@@ -410,12 +420,39 @@ mod tests {
                 llm: Some("codex-pro".into()),
                 model_real: Some("gpt-5.5".into()),
                 context_percent: Some(42.5),
+                context_used: Some(85_000),
+                context_limit: Some(200_000),
                 tokens: Some(1550),
                 input_tokens: Some(1200),
                 output_tokens: Some(350),
                 cache_tokens: Some(90),
                 last_input: Some(800),
                 last_output: Some(120),
+                text: None,
+            }
+        );
+
+        // BACKWARD-COMPAT: an OLD bridge that omits context_used/context_limit must
+        // still parse (additive fields → None), and the bare percent path still works.
+        let status_no_chars = CoreToUi::parse_line(
+            r#"{"type":"Status","context_percent":33.0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            status_no_chars,
+            CoreToUi::Status {
+                model: None,
+                llm: None,
+                model_real: None,
+                context_percent: Some(33.0),
+                context_used: None,
+                context_limit: None,
+                tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_tokens: None,
+                last_input: None,
+                last_output: None,
                 text: None,
             }
         );

@@ -37,6 +37,8 @@ pub(in crate::app) trait FrameSink {
         llm: Option<String>,
         model_real: Option<String>,
         context_percent: Option<f64>,
+        context_used: Option<u64>,
+        context_limit: Option<u64>,
         tokens: Option<u64>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
@@ -66,6 +68,8 @@ pub(in crate::app) fn apply_frame<S: FrameSink>(sink: &mut S, frame: CoreToUi, n
             llm,
             model_real,
             context_percent,
+            context_used,
+            context_limit,
             tokens,
             input_tokens,
             output_tokens,
@@ -78,6 +82,8 @@ pub(in crate::app) fn apply_frame<S: FrameSink>(sink: &mut S, frame: CoreToUi, n
             llm,
             model_real,
             context_percent,
+            context_used,
+            context_limit,
             tokens,
             input_tokens,
             output_tokens,
@@ -91,6 +97,39 @@ pub(in crate::app) fn apply_frame<S: FrameSink>(sink: &mut S, frame: CoreToUi, n
         CoreToUi::RewindResult { dropped, remaining } => sink.on_rewind_result(dropped, remaining),
         CoreToUi::Error { message, fatal, .. } => sink.on_error(message, fatal),
     }
+}
+
+/// Clip a tool result to a short PREVIEW for the `/verbose` inspector's `result`
+/// field (the full text is kept separately as `raw`): the first
+/// [`AUDIT_PREVIEW_LINES`] non-empty content lines, joined with `\n`, each capped
+/// to [`AUDIT_PREVIEW_COLS`] chars (char-count cap — the styled pane re-wraps), an
+/// `…` appended to a line that was cut and a final `…` line when lines were
+/// dropped. Bounded by `.take()` (terminates on a finite slice; no manual loop).
+/// PURE.
+fn clip_audit_preview(result: &str) -> String {
+    const AUDIT_PREVIEW_LINES: usize = 8;
+    const AUDIT_PREVIEW_COLS: usize = 200;
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let all: Vec<&str> = trimmed.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut out: Vec<String> = all
+        .iter()
+        .take(AUDIT_PREVIEW_LINES)
+        .map(|l| {
+            if l.chars().count() > AUDIT_PREVIEW_COLS {
+                let cut: String = l.chars().take(AUDIT_PREVIEW_COLS).collect();
+                format!("{cut}…")
+            } else {
+                (*l).to_string()
+            }
+        })
+        .collect();
+    if all.len() > AUDIT_PREVIEW_LINES {
+        out.push("…".to_string());
+    }
+    out.join("\n")
 }
 
 impl AppState {
@@ -197,16 +236,17 @@ impl FrameSink for AppState {
             }
         }
         // Harvest tool calls in the just-finalized assistant message into the
-        // `/verbose` audit trail (split-borrow: read the source, then push).
+        // `/verbose` inspector trail as full records (S7; split-borrow: read the
+        // source, then push). Each chip's `name/args/result/status` come straight
+        // from `parse_tool_calls`; GA has NO distinct raw payload, so `raw` is the
+        // full result text and `result` is a clipped preview (first lines) — the
+        // inspector's Result vs Raw fields. `parse_tool_calls`' s per-message id is
+        // ignored; `push_tool_audit` assigns the session-wide monotonic `t{id}`.
         if let Some(src) = finalized_source {
             for tc in crate::render::chip::parse_tool_calls(&src) {
-                let (badge, _) = tc.status.badge();
-                let args = if tc.args.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", tc.args)
-                };
-                self.push_tool_audit(format!("{} {}{}", badge, tc.name, args));
+                let raw = tc.result.clone();
+                let result = clip_audit_preview(&tc.result);
+                self.push_tool_audit(tc.name, tc.args, result, tc.status, raw);
             }
         }
         // Freeze this turn's duration for the above-composer done-line (Q7) BEFORE
@@ -241,6 +281,8 @@ impl FrameSink for AppState {
         llm: Option<String>,
         model_real: Option<String>,
         context_percent: Option<f64>,
+        context_used: Option<u64>,
+        context_limit: Option<u64>,
         tokens: Option<u64>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
@@ -259,6 +301,14 @@ impl FrameSink for AppState {
         if let Some(p) = context_percent {
             self.context_percent = Some(p);
             self.cost.context_percent = Some(p);
+        }
+        // Raw char counts (S4) — only set when present (an older bridge omits them;
+        // keep the last-known so the readout doesn't flicker to `—`).
+        if context_used.is_some() {
+            self.context_used = context_used;
+        }
+        if context_limit.is_some() {
+            self.context_limit = context_limit;
         }
         if let Some(tk) = tokens {
             self.tokens = Some(tk);
@@ -373,6 +423,8 @@ impl FrameSink for Session {
         _llm: Option<String>,
         _model_real: Option<String>,
         context_percent: Option<f64>,
+        _context_used: Option<u64>,
+        _context_limit: Option<u64>,
         _tokens: Option<u64>,
         _input_tokens: Option<u64>,
         _output_tokens: Option<u64>,
@@ -428,6 +480,8 @@ mod tests {
                 llm: None,
                 model_real: None,
                 context_percent: Some(48.0),
+                context_used: Some(96_000),
+                context_limit: Some(200_000),
                 tokens: Some(100),
                 input_tokens: Some(60),
                 output_tokens: Some(40),

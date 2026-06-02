@@ -304,8 +304,9 @@ pub fn render_assistant_cockpit_plain(
 /// Render ONE turn's body (a `fold_turns` `Text` segment, or a whole message) into
 /// `logical` as `(styled line, node tag)` pairs (redesign_cc.md §1/§2):
 ///   * the leading `Turn N ...` boundary line is DROPPED (it's spacing, never text);
-///   * a `<summary>…</summary>` becomes a dim italic breadcrumb above the body
-///     (the tags themselves are HIDDEN — never shown raw);
+///   * a `<summary>…</summary>` is STRIPPED (tags + inner) so it never shows raw; it
+///     is NOT re-emitted as a breadcrumb — the ` ▾ `/` ▸ ` turn header already shows
+///     this same summary as its title, so a `↳` line would just duplicate it (S2);
 ///   * compact `🛠️ name(args)` calls render as tui_v3-style bordered BOXES — each
 ///     tagged with a stable block-global [`NodeId::Tool`] (so a click expands its
 ///     result) and expanded per `folds`; `tool_idx` is the running block-global tool
@@ -313,7 +314,7 @@ pub fn render_assistant_cockpit_plain(
 ///   * `[Action]/[Status]/[Info]` result prefixes stay dim;
 ///   * `!!!Error: …` renders as a compact dim/red line;
 ///   * everything else flows through the markdown walker.
-/// Prose / breadcrumb rows are tagged `None`. PURE over `(body, theme, width, folds)`
+/// Prose rows are tagged `None`. PURE over `(body, theme, width, folds)`
 /// + the `tool_idx` it advances.
 fn render_turn_body(
     body: &str,
@@ -323,8 +324,6 @@ fn render_turn_body(
     tool_idx: &mut u32,
     logical: &mut Vec<(Line<'static>, Option<NodeId>)>,
 ) {
-    use crate::theme::Token;
-
     let start_len = logical.len();
     let push_prose = |lines: Vec<Line<'static>>, logical: &mut Vec<(Line<'static>, Option<NodeId>)>| {
         logical.extend(lines.into_iter().map(|l| (l, None)));
@@ -334,23 +333,13 @@ fn render_turn_body(
     //    content — §1: do NOT render it as text).
     let body = strip_leading_turn_line(body);
 
-    // 2) Hoist the `<summary>…</summary>` to a dim breadcrumb and remove the tags
-    //    (+ their inner text) from the flowing body so they never show raw (§1).
-    let (breadcrumb, body_no_summary) = hoist_summary(body);
-    if let Some(crumb) = breadcrumb {
-        let crumb = collapse_ws(&crumb);
-        if !crumb.is_empty() {
-            logical.push((
-                Line::from(Span::styled(
-                    format!("↳ {}", clip_to_cells(&crumb, (width as usize).saturating_sub(2).max(1))),
-                    Style::default()
-                        .fg(theme.color(Token::Dim))
-                        .add_modifier(Modifier::ITALIC),
-                )),
-                None,
-            ));
-        }
-    }
+    // 2) STRIP the `<summary>…</summary>` (tags + inner text) from the flowing body
+    //    so the tags never render raw (§1). The summary is NOT re-emitted as a `↳`
+    //    breadcrumb: that duplicated the ` ▾ `/` ▸ ` header (whose title IS this same
+    //    summary, via `turn_title_pub`) — the ugly twin the user flagged (S2). The
+    //    caret header is now the single canonical summary display; the only indented
+    //    detail is the tool boxes' genuine output (R2). The breadcrumb's discarded.
+    let (_breadcrumb, body_no_summary) = hoist_summary(body);
 
     // 3) Interleave prose (markdown) and compact tool-call bullets, preserving order.
     let body = &body_no_summary;
@@ -697,29 +686,6 @@ fn hoist_summary(body: &str) -> (Option<String>, String) {
     s.push_str(&body[close_end..]);
     let breadcrumb = if inner.is_empty() { None } else { Some(inner) };
     (breadcrumb, s)
-}
-
-/// Collapse internal whitespace runs to single spaces and trim. PURE.
-fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Clip a string to at most `max` display cells (CJK-correct, no ellipsis). PURE.
-fn clip_to_cells(s: &str, max: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut acc = 0usize;
-    for g in s.graphemes(true) {
-        let gw = UnicodeWidthStr::width(g);
-        if acc + gw > max {
-            break;
-        }
-        out.push_str(g);
-        acc += gw;
-    }
-    out
 }
 
 /// The plain-text projection of an assistant block's rendered markdown — the
@@ -1354,9 +1320,10 @@ done.";
         assert!(joined.iter().any(|l| l.contains("body two")));
     }
 
-    /// THE deliverable test (§1): `<summary>…</summary>` tags are HIDDEN — never
-    /// rendered raw. The inner text surfaces as a dim breadcrumb (`↳ …`); the
-    /// literal `<summary>`/`</summary>` strings appear NOWHERE in the output.
+    /// THE deliverable test (§1, updated S2): `<summary>…</summary>` tags are HIDDEN
+    /// — never rendered raw. The inner text surfaces ONCE, as the ` ▾ ` turn header's
+    /// title (NOT a duplicated `↳` breadcrumb — S2 deleted that twin); the literal
+    /// `<summary>`/`</summary>` strings appear NOWHERE, and no `↳` glyph is emitted.
     #[test]
     fn summary_tags_hidden() {
         let theme = Theme::default_theme();
@@ -1364,9 +1331,13 @@ done.";
         let plain = render_assistant_cockpit_plain(src, &theme, false, 80);
         assert!(!plain.contains("<summary>"), "the opening tag must never render: {plain:?}");
         assert!(!plain.contains("</summary>"), "the closing tag must never render: {plain:?}");
-        // The inner text is preserved as a breadcrumb (the `↳` marker is the tell).
-        assert!(plain.contains("用户打招呼，扫描标签页"), "summary inner is kept as a breadcrumb");
-        assert!(plain.contains('↳'), "the breadcrumb marker is present");
+        // The single (expanded) turn carries the summary as its ` ▾ ` header title.
+        assert!(
+            plain.contains(" ▾ 用户打招呼，扫描标签页"),
+            "summary inner surfaces in the ▾ turn header: {plain:?}"
+        );
+        // The ugly duplicate breadcrumb is GONE — no `↳` glyph anywhere (S2).
+        assert!(!plain.contains('↳'), "no `↳` breadcrumb may be emitted: {plain:?}");
         // The prose after the summary still renders.
         assert!(plain.contains("Hello there."));
     }
@@ -1399,7 +1370,7 @@ done.";
     /// recorded from a live `ga_bridge.py` session): bare `Turn N ...` boundaries,
     /// `<summary>…</summary>`, and compact `🛠️ code_run({…json…})` with nested braces
     /// in the args. The renderer must hide every raw marker and surface bordered tool
-    /// boxes + breadcrumbs — this is the exact format that motivated the redesign.
+    /// boxes + caret summary headers — the exact format that motivated the redesign.
     #[test]
     fn real_ga_code_run_trace_renders_clean() {
         let theme = Theme::default_theme();
@@ -1420,13 +1391,15 @@ done.";
         // The final (expanded) turn's output renders.
         assert!(plain.contains("hi"));
 
-        // BOX check: a SINGLE-turn version (the active turn) shows the summary as a
-        // dim `↳` breadcrumb + the compact tool as a bordered box whose top border
-        // carries the name; the `script` priority field is plucked as the arg-hint
-        // (parsed whole out of the nested-brace JSON).
+        // BOX check: a SINGLE-turn version (the active, expanded turn) shows the
+        // summary ONCE — as the ` ▾ ` turn header title, NOT a duplicated `↳`
+        // breadcrumb (S2 deleted that twin) — plus the compact tool as a bordered box
+        // whose top border carries the name; the `script` priority field is plucked as
+        // the arg-hint (parsed whole out of the nested-brace JSON).
         let one = "Turn 1 ...\n<summary>准备执行echo hi</summary>\n🛠️ code_run({\"script\": \"echo hi\", \"type\": \"powershell\"})\nhi there";
         let oplain = render_assistant_cockpit_plain(one, &theme, false, 100);
-        assert!(oplain.contains("↳ 准备执行echo hi"), "active-turn summary as breadcrumb: {oplain:?}");
+        assert!(oplain.contains(" ▾ 准备执行echo hi"), "active-turn summary in the ▾ header: {oplain:?}");
+        assert!(!oplain.contains('↳'), "no `↳` breadcrumb may be emitted (S2): {oplain:?}");
         assert!(oplain.contains("╭─"), "compact tool as a bordered box: {oplain:?}");
         assert!(oplain.contains("code_run"), "tool name on the box top border: {oplain:?}");
         assert!(oplain.contains("echo hi"), "the `script` arg-hint is plucked whole: {oplain:?}");

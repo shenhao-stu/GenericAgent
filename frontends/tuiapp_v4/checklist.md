@@ -1,66 +1,68 @@
-# tui_v4 — Round-5 checklist (LIVE tracker)
+# tui_v4 — Round-6 checklist (LIVE tracker)
 
-> Verification rule (unchanged from R4): a box ticks ONLY on evidence from the
-> **live/styled** path — text fed through `apply_bridge_event`, the styled
-> `TestBackend` cell grid scanned, or real key/mouse events. A passing unit test on a
-> hand-built fixture is NOT acceptance. Specs: `recon/round5/R1..R6`. Plan:
-> `IMPLEMENTATION_PLAN_R5.md`.
-> **Result: v0.5.0 — 370 passed / 0 failed / 0 warnings; 4 parity invariants green;
-> release exe built (9.6s); adversarial Monitor (5 Opus verifiers) ALL CONFIRMED.**
+> Verification rule (R4/R5/R6): a box ticks ONLY on **live/styled** evidence (text fed
+> through `apply_bridge_event`, styled `TestBackend` cells scanned, real key/mouse
+> events, or `--dump-frame` rendered rows) — never a clean-fixture unit test alone.
+> Safety (R5 freeze): every cargo gate `timeout`-wrapped; ONE cargo at a time; impl on
+> Opus; every new `while`/`loop` proven to advance/break. Specs: `recon/round6/R1_audit.md`
+> (parity), `recon/round6/R2_reference.md` (codex/cc rendering), `IMPLEMENTATION_PLAN_R6.md`.
+> **Result: v0.6.0 — 383 passed / 0 failed / 0 warnings / 1.4s; 4 parity invariants green;
+> release exe built; adversarial Monitor (5 Opus reviewers) — M1/M2/M4/M5 CONFIRMED,
+> M3 found one GA-core blocker (S5, see below).**
 
 ---
 
-## ⚠️ The round-5 incident (write it down)
-A **Sonnet** implementation agent (S3) shipped an **infinite loop** in the new
-`extract_block_math_paragraphs` (`render.rs`): at end-of-input (`i == len`) it did
-`continue` without advancing `i`, spinning the empty trailing chunk forever. Because
-that helper runs on EVERY markdown render, the slice's `cargo test` gate hung; the
-hung test binaries (`tui_v4-<hash>.exe`) pinned the CPU and **froze the user's
-machine**. Fix: `break` at end-of-source (`render.rs:125`). Hardening adopted:
-(1) implementation/finish work moved to **Opus** (user directive — strongest model);
-(2) every later gate runs `timeout … cargo test` so a hang self-kills, never spins;
-(3) one `cargo` at a time. The Monitor compiled a standalone replica of the loop and
-proved it terminates on empty/EOF/no-newline inputs.
+## Slices
 
-## Slices (all DONE, gate = build + test 0/0 + live honest-check + Monitor)
+- [x] **S1 — content + composer HUG THE TOP.** Round-5 bottom-anchor flipped: `split_cockpit`
+  pins the transcript to `Length(total_visual_lines)` + a trailing `Min(0)` bottom spacer
+  (overflow → `Min(0)` + composer pinned, scrolls). `prepare_frame` syncs the width-only
+  cache BEFORE the split so both `split_cockpit` calls read the same `total_visual_lines()`
+  (no geometry drift; 4 parity invariants intact). `render_transcript` bottom-anchor removed.
+  *Dump-verified (normal/busy/done): content at TOP, blank at BOTTOM.* **Monitor M1 CONFIRMED.**
+- [x] **S2 — remove the ugly duplicate `↳` breadcrumb (R1 GAP A).** `render_turn_body` keeps
+  `hoist_summary` (strips raw `<summary>` tags) but no longer pushes the `↳ <summary>` line —
+  the ` ▾ `/` ▸ ` fold header is the single canonical summary display (re-collapse intact).
+  *Dump: `▾` header once, zero `↳`.* **Monitor M1 CONFIRMED.**
+- [x] **S3 — `/goal /hive /conductor` command-char FX (like `/morphling`).** All four style
+  the command word with strong, per-char, phase-0-visible, mutually-distinct RGB+BOLD
+  effects (Goal gradient / Hive swarm / Conductor baton / Morphling rainbow); the effect now
+  shows WHILE TYPING (inverse caret rides one grapheme inside the styled word).
+  **Monitor M2 CONFIRMED** (helper-level test; wired into the live render path).
+- [x] **S4 — footer pipe fields + ctx bar.** `Channel: | Model: | Effort: | ctx: [█…░] Nk/Mk (P%) | branch: | mouse:`.
+  Additive `context_used`/`context_limit` wired ga_bridge→protocol→app→reducer (wire-safe).
+  **Gating fixed inline:** the ctx BAR is the headline → dropped LAST (trailing `mouse:`/`branch:`
+  shed first). *Dump (100w): `ctx: [████████░░░░░░░░] 96k/200k (48%)`.* **Monitor M2 CONFIRMED.**
+- [x] **S5 — paste IMAGES + FILES into the composer (the tuiapp_v2/tui_v3 PATH model).**
+  M3 found the base64→`Submit.images` route dies at GA core (`agentmain.py run()` drops
+  `task["images"]`). The user steered to the v2/v3 approach: **the image/file travels as its
+  PATH inline in the prompt; GA reads the file** (tuiapp_v2 `submit_user_message` sends only
+  text — `put_task(text)` — the path is in it). Reworked: Ctrl+V folds a clipboard bitmap →
+  temp PNG `[Image #N]` (arboard image-data + png 0.17) / a file path → `[File #N]`; on submit
+  BOTH expand to their PATH inline (`paste.rs expand`). Dropped the base64/`Submit.images`
+  route + its dead helpers (`collect_images`/`build_submit_images`/`mime_for_path`). **No
+  GA-core edit — fully in-constraint, v2/v3 parity.** *Test: `attach_image_folds_placeholder_and_submit_inlines_path`.*
+- [x] **S6 — port `continue_cmd.py` preview fix → Rust.** Dirty-summary rejection
+  (`=== `/`"role"`/>200ch) + newest-first `last_user`/`prompt_blocks` fallback (no more JSON
+  debris). **Monitor M4 CONFIRMED** (malformed-log test).
+- [x] **S7 — `/verbose` interactive inspector (R1 GAP B, parity red line).** Flat `Vec<String>`
+  → `Vec<ToolAuditRecord>{name,args,result,status,raw}` from real wire tool calls; two-pane
+  list+detail; ↑↓/kj select, PgUp/PgDn scroll, Enter cycle result→args→raw, c copy, e export.
+  **Monitor M4 CONFIRMED.**
 
-- [x] **S1 — mouse TOGGLE model + click expand/collapse ▸/▾.** Default = NATIVE
-  (`term.rs`: no `EnableMouseCapture`, `EnableAlternateScroll`=`?1007h` → native OS
-  drag-select + wheel-as-arrows, the Codex model); `/mouse` + `Ctrl+Shift+M` toggle
-  capture ON for click-fold/wheel; footer shows `mouse: select`/`mouse: click`.
-  `FoldSegment::Text{turn}` + a ` ▾ <title>` header tagged `NodeId::Turn` for expanded
-  turns (re-collapsible); full-width hit-zone for `NodeId::Tool`. Same `NodeId::Turn`
-  drives ` ▸ `(folded) ⇄ ` ▾ `(expanded). *Tests:* `expanded_turn_has_downward_triangle_header_and_can_be_recollapsed`, `expanded_tool_box_affordance_row_is_clickable_at_interior_col`. **Monitor M1 CONFIRMED.**
-- [x] **S2 — blank-gap bottom-anchor.** `transcript.rs render_transcript` renders into
-  a sub-rect at `y+gap` when `following() && total < height` so content sits flush above
-  the spinner; scrolled-up/overflow paths provably un-shoved. *Test:* `blank_gap_bottom_anchor_live_path` (gap==0, `╰─╯` present). **Monitor M3 CONFIRMED.**
-- [x] **S3 — markdown.** Table phantom-column removed (TableHead/TableRow double-push);
-  H1–H6 distinct by **modifier+color, NO bare `#`** (round-4 rule kept — FIX-B's hash
-  prefix reverted); blockquote SoftBreak→newline (scoped to `quote_depth>0`); width-aware
-  HR; **LaTeX `\,` pre-scan** (`extract_block_math_paragraphs`, the loop now `break`s at
-  EOF); nested-list spurious blank fixed (`TagEnd::Item` flushes only with content).
-  *Tests:* `table_no_phantom_column`, `heading_levels_are_visually_distinct`, `blockquote_two_lines_render_as_two_rows`, `block_math_thin_space_not_corrupted`, `nested_list_no_spurious_blank` + the two styled-frame heading tests. **Monitor M2 CONFIRMED.**
-- [x] **S4 — spinner `↑in · ↓out` (eased) + `└` tip.** `render_spinner` shows BOTH
-  arrows from `display_tok_in/out`, eased toward `tok_in/tok_out` in `tick()` (single
-  bounded step, NOT a loop); `⎿`→`└` in `render_tips`. ctx% LEFT truthful (the
-  `context_win*3` denominator matches GA's real trim trigger — NOT a bug; not touched).
-  Stale ↓-only / `⎿` tests rewritten. *Tests:* `spinner_shows_both_up_and_down_arrows`, `tip_rows_use_floor_corner_glyph`, `display_tok_eases_toward_target_on_tick`. **Monitor M4 CONFIRMED.**
-- [x] **S5 — unified `/emoji` (braille/bear/cat pick-one) + animated tab + `/pets` gone.**
-  `CompanionKind { Spinner(SpinnerStyle), Pet(PetStyle) }` replaces the two fields; one
-  9-row picker (3 spinner ids 100-102 + 5 pet + Off); selection drives the spinner LEAD
-  glyph AND the tab; `terminal_title` animates (`spinner_tick / PET_TICKS_PER_FRAME`);
-  `/pets` removed (was a separate cmd, `/emoji` now primary). *Test:* `emoji_unified_picker_and_animated_title`. **Monitor M4 CONFIRMED.** *(The half-applied migration from the stopped Sonnet run was finished on Opus.)*
-- [x] **S6 — sticky last-user-prompt header on scroll.** `last_user_source_first_line()`
-  + a `sticky_header: Option<Rect>` slot (`Length(1)` above the transcript, only when
-  `!following && a prompt exists`) → dim `UserBand` `↑ <prompt…>`. *Test:* `sticky_header_shows_when_scrolled_up_absent_when_following`. **Monitor M5 CONFIRMED.**
-- [x] **S7 — `/keybindings` doc clarity.** Added `Ctrl+G` (stash, moved from `Ctrl+S`) +
-  confirmed the v3→v4 remaps (`Ctrl+Shift+O` fold, `Ctrl+O` copy, `Ctrl+S` dashboard,
-  `Ctrl+B` branch, `Ctrl+Shift+M`/`/mouse` mode + native-select hint) are all listed.
-  *Test:* `keybindings_overlay_lists_v3_to_v4_remaps`. **Monitor M1 CONFIRMED.**
+## Audit (task 1a) — R1: commands + keybindings are a COMPLETE SUPERSET of v2∪v3 (0 gaps);
+the only parity gaps were the 2 rendering items above (A=S2 done, B=S7 done).
 
-## Monitor (adversarial, render-based, 5 Opus verifiers)
-- [x] **M1 mouse+fold · M2 markdown · M3 blank-gap · M4 spinner+emoji · M5 sticky+CPU-safety — ALL CONFIRMED, zero gaps.** M5 (the user's top concern) proved loop safety: suite finishes **1.39s**, every round-5 `while` provably advances/breaks (EOF-`break` at render.rs:125 + a compiled replica hammered on empty/EOF inputs), and **0** `tui_v4`/`cargo`/`rustc` processes leak.
+## Upstream sync (task 5) — `lsdefine/main` merged (`continue_cmd.py` fix → S6).
 
-## Pending (user's call)
-- [ ] Commit / push / release v0.5.0 — NOT done (no authorization this round; awaiting user).
-- [ ] Live aesthetic confirmation (native select+copy feel in the user's terminal; per-command FX colors).
+## Safety (Monitor M5 CONFIRMED) — the R5 freeze cannot recur: 0 new bare loops, the two
+legacy `while`s advance/break at EOF, `markdown/render.rs` untouched, all 10 `--dump-frame`
+scenarios exit 0, `context_win*3` ctx truth intact, no GA-core file edited by these slices.
+
+## Pending
+- [ ] Push + tag `tui-v4-v0.6.0` → release CI (authorized this round).
+
+> Round-6 lesson (write to memory): when a TUI feature seems to need a GA-core change,
+> check how tuiapp_v2/tui_v3 already do it FIRST — image/file paste is **path-in-prompt**
+> (`put_task(text)` only; GA reads the file), NOT base64 multimodal. The base64/`Submit.images`
+> route would have forced an `agentmain.py` red-line edit for nothing.

@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, area: Rect, ov: &Overlay, app: &AppState, theme
         Overlay::Keybindings => info::render_keybindings(frame, area, theme, lang),
         Overlay::Status => info::render_status(frame, area, app, theme, now_ms),
         Overlay::Cost => info::render_cost(frame, area, app, theme),
-        Overlay::Verbose => info::render_verbose(frame, area, app, theme),
+        Overlay::Verbose(state) => info::render_verbose(frame, area, app, state, theme, lang),
         Overlay::Btw { question, answer, .. } => {
             info::render_btw(frame, area, question, answer.as_deref(), theme, lang)
         }
@@ -90,7 +90,13 @@ mod tests {
             let mut app = AppState::new();
             app.cost.input = 100;
             app.cost.output = 250;
-            app.push_tool_audit("Read(src/main.rs)".into());
+            app.push_tool_audit(
+                "Read".into(),
+                "src/main.rs".into(),
+                "ok".into(),
+                crate::render::chip::ToolStatus::Ok,
+                "ok".into(),
+            );
             app.overlay = Some(ov);
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -109,7 +115,7 @@ mod tests {
         render_with(Overlay::Keybindings, "Keyboard shortcuts");
         render_with(Overlay::Status, "model");
         render_with(Overlay::Cost, "Token usage");
-        render_with(Overlay::Verbose, "audit");
+        render_with(Overlay::Verbose(crate::app::VerboseState::default()), "audit");
         render_with(
             Overlay::Picker {
                 picker: Picker::new(

@@ -363,28 +363,32 @@ fn preview_and_rounds(path: &Path, size: u64) -> (String, u32) {
     (preview, rounds)
 }
 
-/// Build the preview from head + tail byte windows: the LAST `<summary>…</summary>`
-/// in the tail, else the first "real" line (not a `===`/`###` header or a
-/// `<history>` block) in the head. Mirrors `continue_cmd._preview_from_file`. PURE.
+/// Build the preview from head + tail byte windows: the LATEST `<summary>…</summary>`
+/// (rejected if dirty — see below), else the last real user prompt (newest-first
+/// over the `=== Prompt ===` blocks). Mirrors the upstream `continue_cmd
+/// ._preview_from_file` fix. PURE.
+///
+/// Dirty-summary guard (the bug the upstream fix closed): models sometimes emit an
+/// UNCLOSED `<summary>`, so the non-greedy match pairs it with a far-away
+/// `</summary>` and swallows `=== ` block headers / `"role"` JSON across rounds.
+/// We take ONLY the latest summary and REJECT it when it carries that debris (or is
+/// implausibly long), falling THROUGH to the last user prompt rather than digging
+/// older summaries.
 pub fn preview_from_windows(head: &[u8], tail: &[u8]) -> String {
     let tail_s = String::from_utf8_lossy(tail);
-    if let Some(sum) = last_summary(&tail_s) {
-        return collapse_ws(&sum);
-    }
-    // Also check the head's tail for a summary in case the file was small (head==all).
     let head_s = String::from_utf8_lossy(head);
-    if let Some(sum) = last_summary(&head_s) {
-        return collapse_ws(&sum);
-    }
-    for line in head_s.lines() {
-        let s = line.trim();
-        if !s.is_empty()
-            && !s.starts_with("===")
-            && !s.starts_with("###")
-            && !s.contains("<history>")
+    // Latest <summary> from the tail (else the head, for small head==all files).
+    if let Some(sum) = last_summary(&tail_s).or_else(|| last_summary(&head_s)) {
+        let s = collapse_ws(&sum);
+        if !s.is_empty() && !s.contains("=== ") && !s.contains("\"role\"") && s.chars().count() <= 200
         {
-            return collapse_ws(s);
+            return s;
         }
+        // else: dirty/absent → fall through to the last user prompt (no older summaries).
+    }
+    // Summary invalid/absent → last real user prompt (skips inject/structure lines).
+    if let Some(lu) = last_user(&tail_s).or_else(|| last_user(&head_s)) {
+        return clip_chars(&collapse_ws(&lu), 120);
     }
     String::new()
 }
@@ -406,6 +410,89 @@ fn last_summary(s: &str) -> Option<String> {
         }
     }
     last
+}
+
+/// Inject/structure markers a real user prompt never opens with — the line-level
+/// port of `continue_cmd._INJECT_MARKERS`. A `=== Prompt ===` body that is only
+/// such markers is an agent auto-continuation, not a user-typed prompt.
+const INJECT_MARKERS: &[&str] = &[
+    "[WORKING MEMORY]",
+    "[SYSTEM TIPS]",
+    "[SYSTEM]",
+    "[System]",
+    "[DANGER]",
+];
+
+/// The last real USER prompt in `s`: scan the `=== Prompt ===` blocks NEWEST-first
+/// and return the first line that survives [`is_user_text`] (skips structure /
+/// inject lines). Mirrors the upstream `continue_cmd._last_user` + `_user_text`,
+/// but line-based (the Rust port grovels raw text windows, not parsed JSON) — so a
+/// response-less/aborted session still previews. PURE.
+fn last_user(s: &str) -> Option<String> {
+    // Newest-first over Prompt blocks (each block's body up to the next === header).
+    for body in prompt_blocks(s).into_iter().rev() {
+        for line in body.lines() {
+            let t = line.trim();
+            if is_user_text(t) {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// True iff `line` looks like user-typed prose (not structure or an inject marker).
+/// Ports the intent of `_user_text`: drop blank lines, `=== `/`###` headers,
+/// `<history>` blocks, and lines containing any [`INJECT_MARKERS`]. PURE.
+fn is_user_text(line: &str) -> bool {
+    !line.is_empty()
+        && !line.starts_with("===")
+        && !line.starts_with("###")
+        && !line.contains("<history>")
+        && !INJECT_MARKERS.iter().any(|m| line.contains(m))
+}
+
+/// Split `s` into the BODIES of its `=== Prompt ===` blocks (each body = the text
+/// after a Prompt header up to the next `=== Prompt ===`/`=== Response ===` header
+/// or EOF), in file order. Mirrors `continue_cmd._BLOCK_RE` restricted to Prompts.
+/// PURE.
+///
+/// Terminates: drains `s.lines()` exactly once (a forward iterator), pushing each
+/// line into the current block or starting/closing a block on a header — there is
+/// no inner loop and no index to mis-advance.
+fn prompt_blocks(s: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut cur: Option<String> = None;
+    for line in s.lines() {
+        if line.starts_with("=== Prompt ===") {
+            if let Some(b) = cur.take() {
+                blocks.push(b);
+            }
+            cur = Some(String::new()); // open a fresh Prompt body
+        } else if line.starts_with("=== Response ===") {
+            if let Some(b) = cur.take() {
+                blocks.push(b); // a Response header closes the current Prompt body
+            }
+        } else if let Some(b) = cur.as_mut() {
+            if !b.is_empty() {
+                b.push('\n');
+            }
+            b.push_str(line);
+        }
+    }
+    if let Some(b) = cur.take() {
+        blocks.push(b);
+    }
+    blocks
+}
+
+/// Clip a string to at most `max` chars (char-, not byte-, boundaries). PURE.
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
 }
 
 /// Count completed Prompt→Response pairs by header lines (a Prompt header followed
@@ -744,6 +831,58 @@ mod tests {
         assert!(bytes_contain_all(b"has ALPHA and BeTa here", &terms));
         assert!(!bytes_contain_all(b"only alpha", &terms));
         assert!(!bytes_contain_all(b"", &terms));
+    }
+
+    /// The upstream `/continue` preview fix, ported (plan §S6): an UNCLOSED
+    /// `<summary>` makes the non-greedy match swallow a later segment's
+    /// `=== Response ===` header + `"role"` JSON debris. Such a dirty summary must
+    /// be REJECTED (not shown, and we do NOT dig older summaries) — the preview
+    /// falls through to the last real user prompt instead. A clean trailing
+    /// `<summary>` still wins.
+    #[test]
+    fn preview_rejects_dirty_summary_and_uses_last_user() {
+        // Malformed log: an unclosed <summary> in an earlier round, then a fresh
+        // user prompt, then a Response whose body JSON closes the stray summary —
+        // so last_summary() pairs them and swallows the header + {"role":"user"}.
+        let log = concat!(
+            "=== Prompt ===\n",
+            "investigate the failing test\n",
+            "=== Response ===\n",
+            "<summary>started looking into it\n", // UNCLOSED — the bug trigger
+            "=== Prompt ===\n",
+            "now fix the parser bug please\n",
+            "=== Response ===\n",
+            "[{\"role\":\"user\",\"content\":\"junk\"}] done</summary>\n",
+        );
+        let preview = preview_from_windows(log.as_bytes(), log.as_bytes());
+        // The dirty summary (carries "=== " and "\"role\"") is rejected; the
+        // preview is the LAST real user prompt, never the JSON debris / header.
+        assert_eq!(preview, "now fix the parser bug please");
+        assert!(!preview.contains("\"role\""), "JSON debris must not leak");
+        assert!(!preview.contains("=== "), "swallowed headers must not leak");
+        assert!(!preview.contains("started looking into it"), "stale summary text must not leak");
+
+        // A summary longer than 200 chars is also rejected as implausible debris.
+        let long = "x".repeat(250);
+        let dirty_long = format!("=== Prompt ===\nreal question\n=== Response ===\n<summary>{long}</summary>\n");
+        assert_eq!(preview_from_windows(dirty_long.as_bytes(), dirty_long.as_bytes()), "real question");
+
+        // A CLEAN trailing summary still wins over the user-prompt fallback.
+        let clean = concat!(
+            "=== Prompt ===\n",
+            "build the feature\n",
+            "=== Response ===\n",
+            "<summary>Implemented the feature and added tests</summary>\n",
+        );
+        assert_eq!(
+            preview_from_windows(clean.as_bytes(), clean.as_bytes()),
+            "Implemented the feature and added tests",
+        );
+
+        // last_user scans Prompt blocks newest-first + skips inject/structure lines;
+        // a response-less (aborted) session still previews from its lone Prompt.
+        let aborted = "=== Prompt ===\n### [WORKING MEMORY] foo\nactual user ask here\n";
+        assert_eq!(preview_from_windows(aborted.as_bytes(), b""), "actual user ask here");
     }
 
     /// The renderer paints the search box + a row to an in-memory backend, and each

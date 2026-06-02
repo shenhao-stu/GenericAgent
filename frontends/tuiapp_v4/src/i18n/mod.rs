@@ -318,9 +318,19 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     ("footer.ctx", "ctx"),
     ("footer.cost", "cost"),
     ("footer.git_none", "—"),
+    // S4 session-info LABELED fields (the ` | `-joined footer row). Kept English in
+    // both locales — the target reads `Channel: codex-pro | Model: gpt-5.5 | …` and
+    // these short ASCII labels read cleaner than a translated word next to a wire id.
+    ("footer.channel", "Channel: "),
+    ("footer.model", "Model: "),
+    ("footer.effort", "Effort: "),
+    ("footer.ctx_label", "ctx: "),
+    ("footer.branch", "branch: "),
     // -- composer -------------------------------------------------------------
     ("composer.placeholder", "type a message…"),
     ("composer.placeholder.shell", "run a host shell command…"),
+    // S5 — Ctrl+V folded a clipboard bitmap into an [Image #N] attachment.
+    ("paste.image", "Image pasted"),
     ("transcript.empty", "  Type a message and press Enter."),
     ("transcript.more_below", "  ▼ more below — End/PgDn to follow"),
     // -- dropdown hints -------------------------------------------------------
@@ -409,6 +419,15 @@ pub const EN_PAIRS: &[(&str, &str)] = &[
     // -- /verbose -------------------------------------------------------------
     ("verbose.title", "Tool-call audit · /verbose"),
     ("verbose.empty", "  no tool calls yet this session."),
+    ("verbose.hint", "↑↓ select · PgUp/PgDn scroll · Enter cycle field · c copy · e export · esc close"),
+    ("verbose.field", "field:"),
+    ("verbose.field.result", "result"),
+    ("verbose.field.args", "args"),
+    ("verbose.field.raw", "raw"),
+    ("verbose.field.empty", "  (empty)"),
+    ("verbose.copied", "copied"),
+    ("verbose.exported", "wrote"),
+    ("verbose.export.failed", "export failed"),
     // -- /btw -----------------------------------------------------------------
     ("btw.title", " /btw "),
     ("btw.querying", "querying… (a side-agent is answering; main task keeps running)"),
@@ -633,9 +652,18 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     ("footer.ctx", "上下文"),
     ("footer.cost", "费用"),
     ("footer.git_none", "—"),
+    // S4 footer labels — kept English in zh too (consistent with the target row;
+    // the wire identity beside them is ASCII so a mixed-script label reads worse).
+    ("footer.channel", "Channel: "),
+    ("footer.model", "Model: "),
+    ("footer.effort", "Effort: "),
+    ("footer.ctx_label", "ctx: "),
+    ("footer.branch", "branch: "),
     // -- composer -------------------------------------------------------------
     ("composer.placeholder", "输入消息…"),
     ("composer.placeholder.shell", "运行主机 shell 命令…"),
+    // S5 — Ctrl+V 把剪贴板位图折叠成 [Image #N] 附件。
+    ("paste.image", "已粘贴图片"),
     ("transcript.empty", "  输入消息并按 Enter。"),
     ("transcript.more_below", "  ▼ 下方还有内容 —— End/PgDn 跟随"),
     // -- dropdown hints -------------------------------------------------------
@@ -724,6 +752,15 @@ pub const ZH_PAIRS: &[(&str, &str)] = &[
     // -- /verbose -------------------------------------------------------------
     ("verbose.title", "工具调用审计 · /verbose"),
     ("verbose.empty", "  本会话还没有工具调用。"),
+    ("verbose.hint", "↑↓ 选择 · PgUp/PgDn 滚动 · Enter 切换字段 · c 复制 · e 导出 · esc 关闭"),
+    ("verbose.field", "字段："),
+    ("verbose.field.result", "结果"),
+    ("verbose.field.args", "参数"),
+    ("verbose.field.raw", "原始"),
+    ("verbose.field.empty", "  （空）"),
+    ("verbose.copied", "已复制"),
+    ("verbose.exported", "已写入"),
+    ("verbose.export.failed", "导出失败"),
     // -- /btw -----------------------------------------------------------------
     ("btw.title", " /btw "),
     ("btw.querying", "查询中…（side-agent 正在回答；主任务继续运行）"),

@@ -185,11 +185,9 @@ pub(crate) fn cockpit_key(key: KeyEvent, app: &mut AppState, now_ms: u64) {
             }
             return;
         }
-        // Ctrl+V — paste from the native clipboard.
+        // Ctrl+V — paste from the native clipboard (text first, then a bitmap).
         KeyCode::Char('v') if ctrl => {
-            if let Some(text) = clipboard::read_clipboard() {
-                app.composer.paste(&text);
-            }
+            paste_clipboard(app);
             return;
         }
         // (Ctrl+S now opens the session dashboard — handled in the chords block
@@ -446,6 +444,37 @@ pub(crate) fn cockpit_esc(app: &mut AppState, now_ms: u64, width: u16) {
             dispatch::open_ui_command(app, "rewind", "");
         }
         EscAction::Back => cockpit_universal_back(app, width),
+    }
+}
+
+/// Ctrl+V paste (S5): try clipboard TEXT first (the common case → the composer
+/// folds a large/multi-line chunk; a single-line path string still folds to
+/// `[File #N]`/`[Image #N]` past the threshold). When there is NO text but a
+/// bitmap IS on the clipboard (a copied screenshot), encode it to a temp PNG under
+/// `repo_root/temp/` and fold it as an `[Image #N]` placeholder. On submit the
+/// placeholder expands to that temp-PNG PATH inline in the prompt (the tuiapp_v2/v3
+/// model — GA reads the file from the path; no base64). Best-effort: a clipboard
+/// with neither text nor a (decodable) image is a silent no-op. No loops.
+pub(crate) fn paste_clipboard(app: &mut AppState) {
+    if let Some(text) = clipboard::read_clipboard() {
+        if !text.is_empty() {
+            app.composer.paste(&text);
+            return;
+        }
+    }
+    // No text → try a bitmap. Write it to a per-process, monotonically-numbered
+    // temp PNG so two pastes never collide, then fold the path as [Image #N].
+    if let Some((png, _w, _h)) = clipboard::read_clipboard_image() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let temp_dir = app.repo_root.join("temp");
+        let _ = std::fs::create_dir_all(&temp_dir); // idempotent; best-effort.
+        let path = temp_dir.join(format!("tui_v4_paste_{}_{}.png", std::process::id(), n));
+        if std::fs::write(&path, &png).is_ok() {
+            let id = app.composer.attach_image(&path.to_string_lossy());
+            app.push_notice(format!("{} (#{id})", i18n::t(app.lang, "paste.image")));
+        }
     }
 }
 

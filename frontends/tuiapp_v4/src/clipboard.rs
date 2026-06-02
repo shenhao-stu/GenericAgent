@@ -57,6 +57,42 @@ pub(crate) fn read_clipboard() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+/// Read a bitmap from the native clipboard (a copied screenshot) and re-encode
+/// its raw RGBA pixels to PNG bytes, returning `(png_bytes, width, height)`.
+/// Best-effort — `None` on any error (no image on the clipboard, the platform
+/// backend lacks `image-data`, or an encode failure). This is the thin effectful
+/// wrapper (OS clipboard read); the pure RGBA→PNG step is [`encode_rgba_png`],
+/// which is unit-tested without a clipboard.
+pub(crate) fn read_clipboard_image() -> Option<(Vec<u8>, u32, u32)> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let w = u32::try_from(img.width).ok()?;
+    let h = u32::try_from(img.height).ok()?;
+    let png = encode_rgba_png(&img.bytes, w, h)?;
+    Some((png, w, h))
+}
+
+/// Encode raw RGBA8 pixels (`width*height*4` bytes, row-major) to PNG bytes via
+/// the `png` crate. Returns `None` on a size mismatch or an encoder error. PURE
+/// over its inputs (no OS / clipboard), so it is unit-testable directly.
+pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if width == 0 || height == 0 || rgba.len() < expected {
+        return None;
+    }
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().ok()?;
+        // arboard may hand back a longer buffer (stride padding); feed exactly the
+        // `width*height*4` pixels the header declares.
+        writer.write_image_data(&rgba[..expected]).ok()?;
+        writer.finish().ok()?;
+    }
+    Some(out)
+}
+
 /// Perform an `/export` action by row id: 0 = clip (last reply via OSC52), 1 = all
 /// (whole transcript to clipboard), 2 = file (last reply to a cwd file).
 pub(crate) fn export_action(app: &mut AppState, id: usize) {
@@ -90,5 +126,45 @@ pub(crate) fn export_action(app: &mut AppState, id: usize) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S5 — the PURE RGBA→PNG encoder (`read_clipboard_image`'s testable half; the
+    /// OS clipboard read itself is effectful + NOT unit-tested). A 2×2 RGBA buffer
+    /// encodes to real PNG bytes (PNG magic header) that DECODE back to the same
+    /// 2×2 RGBA via the `png` crate — proving the bytes are a valid image, not a
+    /// blob. A size mismatch / zero dimension is rejected (`None`).
+    #[test]
+    fn encode_rgba_png_round_trips_a_valid_png() {
+        // 2×2 RGBA: red, green / blue, white. (16 bytes = 2*2*4.)
+        let rgba: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, // row 0
+            0, 0, 255, 255, 255, 255, 255, 255, // row 1
+        ];
+        let png = encode_rgba_png(&rgba, 2, 2).expect("encode a 2x2 RGBA buffer");
+        // PNG magic header.
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']);
+
+        // Decode it back and confirm the dimensions + pixels survive.
+        let decoder = png::Decoder::new(png.as_slice());
+        let mut reader = decoder.read_info().expect("the encoded bytes are a valid PNG");
+        let info = reader.info();
+        assert_eq!((info.width, info.height), (2, 2));
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut buf).expect("decode frame");
+        assert_eq!(&buf[..frame.buffer_size()], rgba.as_slice(), "pixels round-trip");
+
+        // An over-long arboard buffer (stride padding) is truncated to w*h*4, OK.
+        let mut padded = rgba.clone();
+        padded.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(encode_rgba_png(&padded, 2, 2).is_some());
+
+        // Too-small buffer / zero dimension → None (best-effort guard).
+        assert!(encode_rgba_png(&rgba, 2, 3).is_none(), "fewer bytes than w*h*4 → None");
+        assert!(encode_rgba_png(&rgba, 0, 2).is_none(), "zero width → None");
     }
 }

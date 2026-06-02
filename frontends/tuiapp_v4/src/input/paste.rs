@@ -6,8 +6,9 @@
 //! flush against the END of a placeholder (or Delete against its START) wipes the
 //! WHOLE token and drops its store entry — never a lone bracket.
 //!
-//! On submit the placeholders expand back to their payloads (text inline; image
-//! paths collected as `Submit.images`). All PURE + unit-tested.
+//! On submit the placeholders expand back to their payloads — text inline, and
+//! image/file PATHS inline (the tuiapp_v2/v3 model: the image travels as its path
+//! in the prompt and GA reads the file; no base64 `Submit.images`). PURE + tested.
 
 use std::collections::HashMap;
 
@@ -16,7 +17,8 @@ use std::collections::HashMap;
 pub enum PasteKind {
     /// A folded multi-line / large text paste — expands back to the text inline.
     Text(String),
-    /// A pasted image path — collected as a `Submit.images[]` entry, not inlined.
+    /// A pasted image path — expands to the path inline (v2/v3 model; GA reads the
+    /// file from the path in the prompt). No base64 `Submit.images`.
     Image(String),
     /// A pasted file path — expands to the path (so `@`/file expansion can run).
     File(String),
@@ -96,9 +98,9 @@ impl PasteStore {
         self.entries.remove(&id);
     }
 
-    /// Expand every placeholder in `text` back to its payload (text inline, file
-    /// path inline; an image placeholder is REMOVED from text since its path
-    /// travels via [`collect_images`]). PURE over the store.
+    /// Expand every placeholder in `text` back to its payload — text inline, and
+    /// `[File #N]`/`[Image #N]` to their PATH inline (the v2/v3 model: the image
+    /// travels as its path in the prompt, GA reads the file). PURE over the store.
     pub fn expand(&self, text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut cursor = 0usize;
@@ -106,26 +108,17 @@ impl PasteStore {
             out.push_str(&text[cursor..ph.start]);
             match self.entries.get(&ph.id) {
                 Some(PasteKind::Text(t)) => out.push_str(t),
-                Some(PasteKind::File(p)) => out.push_str(p),
-                Some(PasteKind::Image(_)) | None => { /* image → dropped from text */ }
+                // Image AND File both expand to their PATH inline (the tuiapp_v2 /
+                // tui_v3 model — `submit_user_message` sends only text, the image
+                // travels as its path in the prompt; GA reads the file from the path).
+                // No base64 / `Submit.images` — that route needs a GA-core consumer.
+                Some(PasteKind::File(p)) | Some(PasteKind::Image(p)) => out.push_str(p),
+                None => {}
             }
             cursor = ph.end;
         }
         out.push_str(&text[cursor..]);
         out
-    }
-
-    /// Collect the image paths referenced by `[Image #N]` placeholders present in
-    /// `text`, in order (the `Submit.images` payload).
-    #[allow(dead_code)] // image attachment wires through here in Phase 3.
-    pub fn collect_images(&self, text: &str) -> Vec<String> {
-        let mut imgs = Vec::new();
-        for ph in find_placeholders(text) {
-            if let Some(PasteKind::Image(p)) = self.entries.get(&ph.id) {
-                imgs.push(p.clone());
-            }
-        }
-        imgs
     }
 }
 
@@ -289,19 +282,19 @@ mod tests {
     }
 
     #[test]
-    fn expand_inlines_text_and_file_but_routes_image_to_images() {
+    fn expand_inlines_text_file_and_image_paths() {
         let mut s = PasteStore::new();
         let t = s.fold_text("hello\nworld");
         let img = s.fold_image("/tmp/a.png");
         let f = s.fold_file("src/x.rs");
         let buf = format!("{} {} {}", t.insert, img.insert, f.insert);
-        // Text + file inline; image dropped from text.
+        // Text, file AND image all expand to their payload/path INLINE (the v2/v3
+        // path model — the image travels as its path in the prompt, GA reads it).
         let expanded = s.expand(&buf);
         assert!(expanded.contains("hello\nworld"));
         assert!(expanded.contains("src/x.rs"));
-        assert!(!expanded.contains("a.png"));
-        // The image path is collected for Submit.images.
-        assert_eq!(s.collect_images(&buf), vec!["/tmp/a.png".to_string()]);
+        assert!(expanded.contains("/tmp/a.png"), "the image PATH inlines into text: {expanded:?}");
+        assert!(!expanded.contains("[Image #") && !expanded.contains("[File #"), "placeholders gone");
     }
 
     #[test]
@@ -313,4 +306,5 @@ mod tests {
         assert!(is_image_path("/tmp/screenshot.PNG"));
         assert!(!is_image_path("notes.txt"));
     }
+
 }

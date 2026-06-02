@@ -31,6 +31,9 @@ pub(crate) fn dispatch_action(app: &mut AppState, action: input::ComposerAction)
                 dispatch_slash(app, &expanded);
             } else {
                 app.push_user(text.clone());
+                // R6 path model: a pasted `[Image #N]`/`[File #N]` was already
+                // expanded to its PATH inline in `text` (tuiapp_v2/v3 — the image
+                // travels as its path, GA reads the file). No base64 `Submit.images`.
                 app.emit(AppEvent::ToActive(UiToCore::Submit { text: expanded, images: None }));
             }
         }
@@ -190,7 +193,9 @@ pub(crate) fn open_ui_command(app: &mut AppState, name: &str, args: &str) {
             }
             app.open_picker(Picker::new(PickerKind::Export, items), None);
         }
-        "verbose" | "tools" | "trace" => app.open_overlay(app::Overlay::Verbose),
+        "verbose" | "tools" | "trace" => {
+            app.open_overlay(app::Overlay::Verbose(app::VerboseState::default()))
+        }
         "rewind" => {
             let items = rewind_picker_items(app);
             if items.is_empty() {

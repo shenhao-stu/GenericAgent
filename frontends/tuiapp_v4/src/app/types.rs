@@ -37,7 +37,11 @@ pub enum Overlay {
     Keybindings,
     Status,
     Cost,
-    Verbose,
+    /// The `/verbose` `/tools` `/trace` INTERACTIVE tool inspector (S7; tui_v3
+    /// `_verbose_view`). Carries the live [`VerboseState`] (selected row + which
+    /// field is shown + the detail scroll) so ↑/↓ select, PgUp/PgDn scroll, Enter
+    /// cycles the field, `c` copies, `e` exports — the overlay isn't read-only.
+    Verbose(VerboseState),
     /// A transient text card (`/btw`'s answer box) above the composer. The
     /// `ask_id` ties an incoming `BtwAnswer` frame back to THIS card so a stale
     /// card (the user fired a second `/btw`) can't show the wrong answer.
@@ -60,7 +64,11 @@ impl Overlay {
     pub fn is_fullscreen(&self) -> bool {
         matches!(
             self,
-            Overlay::Help | Overlay::Keybindings | Overlay::Status | Overlay::Cost | Overlay::Verbose
+            Overlay::Help
+                | Overlay::Keybindings
+                | Overlay::Status
+                | Overlay::Cost
+                | Overlay::Verbose(_)
         )
     }
 
@@ -70,6 +78,89 @@ impl Overlay {
     /// dismisses it, every other key flows to the cockpit.
     pub fn is_modal(&self) -> bool {
         !matches!(self, Overlay::Btw { .. })
+    }
+}
+
+/// One captured tool call for the `/verbose` inspector (S7; tui_v3 `ToolRecord`,
+/// 1619-1626). Built at MessageEnd from the assistant block's `🛠️` chips via
+/// [`crate::render::chip::parse_tool_calls`] (whose `ToolCall` already yields
+/// name/args/result/status). The inspector shows one field at a time:
+/// `args` (the parsed call arguments), `result` (a clipped preview of the
+/// output), and `raw`. GA exposes NO distinct raw payload — its tool result IS
+/// the result text — so `raw` is the FULL untruncated result while `result` is a
+/// clipped preview, mirroring tui_v3's result/raw split. `status` reuses the chip
+/// layer's [`ToolStatus`](crate::render::chip::ToolStatus) (success / error /
+/// pending) so the list colors each row by the same inference the chips use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAuditRecord {
+    /// 1-based id within the audit (tui_v3 `t{id}`), assigned on capture.
+    pub id: u32,
+    pub name: String,
+    pub args: String,
+    /// A clipped preview of the result (the first lines), what the `result` field
+    /// shows. The full text lives in `raw`.
+    pub result: String,
+    pub status: crate::render::chip::ToolStatus,
+    /// The FULL untruncated result text (GA has no separate raw payload).
+    pub raw: String,
+}
+
+/// Which field of the selected [`ToolAuditRecord`] the `/verbose` detail pane
+/// shows. Enter cycles Result → Args → Raw → Result (tui_v3 `mode` over
+/// `('result', 'args', 'raw')`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerboseField {
+    #[default]
+    Result,
+    Args,
+    Raw,
+}
+
+impl VerboseField {
+    /// The next field in the Result → Args → Raw → Result cycle (Enter). PURE.
+    pub fn next(self) -> VerboseField {
+        match self {
+            VerboseField::Result => VerboseField::Args,
+            VerboseField::Args => VerboseField::Raw,
+            VerboseField::Raw => VerboseField::Result,
+        }
+    }
+
+    /// The i18n key for this field's heading + the `c`/`e` label noun. PURE.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            VerboseField::Result => "verbose.field.result",
+            VerboseField::Args => "verbose.field.args",
+            VerboseField::Raw => "verbose.field.raw",
+        }
+    }
+}
+
+/// The live state of the `/verbose` inspector overlay (S7; tui_v3 `_verbose_view`
+/// locals `sel, mode, scroll`). Stored IN the [`Overlay::Verbose`] variant so the
+/// key handler mutates it as the modal stays open. `selected`/`detail_scroll` are
+/// clamped against the live record/line counts at handle time (the counts aren't
+/// known here), so no field can index past the data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerboseState {
+    /// The selected tool-record index (clamped to `tool_audit.len()-1`).
+    pub selected: usize,
+    /// Which field the detail pane shows (Result / Args / Raw).
+    pub field: VerboseField,
+    /// The detail pane's vertical scroll (clamped to the field's wrapped height).
+    pub detail_scroll: u16,
+}
+
+impl VerboseState {
+    /// The text of the selected record's CURRENT field (Result / Args / Raw), or
+    /// `None` if the index is out of range. The `c` copy + `e` export read this.
+    /// PURE.
+    pub fn current_field_text<'a>(&self, audit: &'a [ToolAuditRecord]) -> Option<&'a str> {
+        audit.get(self.selected).map(|r| match self.field {
+            VerboseField::Result => r.result.as_str(),
+            VerboseField::Args => r.args.as_str(),
+            VerboseField::Raw => r.raw.as_str(),
+        })
     }
 }
 

@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::app::{self, AppState, View};
 use crate::app_event::AppEvent;
 use crate::bridge::protocol::UiToCore;
+use crate::clipboard;
 use crate::components;
 use crate::commands::dispatch;
 use crate::i18n;
@@ -462,12 +463,99 @@ pub(crate) fn handle_overlay_key(key: KeyEvent, app: &mut AppState) {
         app::Overlay::Effects => {
             app.effects.demo_timer = 0.0;
         }
-        // Info overlays (help / status / cost / verbose / btw): any of Esc / q /
-        // Enter closes; everything else keeps it open.
+        // The `/verbose` INTERACTIVE tool inspector (S7, tui_v3 `_verbose_view`):
+        // ↑/↓ (k/j) select a tool (resetting the detail scroll), PgUp/PgDn scroll
+        // the detail (saturating — can't underflow/overflow; the render clamps to
+        // the field height), Enter cycles the field Result→Args→Raw, `c` copies the
+        // current field, `e` exports it to a temp file, Esc/q closes.
+        app::Overlay::Verbose(mut state) => {
+            verbose_overlay_key(code, ctrl, &mut state, app);
+        }
+        // Info overlays (help / status / cost / btw): any of Esc / q / Enter closes;
+        // everything else keeps it open.
         other => match code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => { /* closed (taken) */ }
             _ => app.overlay = Some(other),
         },
+    }
+}
+
+/// Drive the `/verbose` inspector's [`VerboseState`](app::VerboseState) from one
+/// key (S7, tui_v3 `_verbose_view` key loop). The overlay was already `take()`n by
+/// the caller, so we put it BACK on every interactive key and leave it gone on
+/// Esc/q (the close). All scroll/selection math is `saturating_*`/clamped — it can
+/// never underflow or run past the data (the render re-clamps `detail_scroll` to
+/// the live field height too). `c`/`e` act on the SELECTED record's current field.
+fn verbose_overlay_key(
+    code: KeyCode,
+    ctrl: bool,
+    state: &mut app::VerboseState,
+    app: &mut AppState,
+) {
+    // A page-ish detail scroll step. The render clamps `detail_scroll` to the field
+    // height, so an over-large step just pins to the bottom (no overflow possible).
+    const DETAIL_PAGE: u16 = 10;
+    let last = app.tool_audit.len().saturating_sub(1);
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // closed (the overlay was taken).
+        }
+        KeyCode::Up | KeyCode::Char('k') if !ctrl => {
+            state.selected = state.selected.saturating_sub(1);
+            state.detail_scroll = 0;
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        KeyCode::Down | KeyCode::Char('j') if !ctrl => {
+            state.selected = (state.selected + 1).min(last);
+            state.detail_scroll = 0;
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        KeyCode::PageUp => {
+            state.detail_scroll = state.detail_scroll.saturating_sub(DETAIL_PAGE);
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        KeyCode::PageDown => {
+            state.detail_scroll = state.detail_scroll.saturating_add(DETAIL_PAGE);
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        KeyCode::Enter => {
+            state.field = state.field.next();
+            state.detail_scroll = 0;
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        KeyCode::Char('c') if !ctrl => {
+            let text = state.current_field_text(&app.tool_audit).unwrap_or("").to_string();
+            let label = i18n::t(app.lang, "verbose.copied");
+            let res = clipboard::copy_text(&text);
+            clipboard::notice_copy(app, &res, label);
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        KeyCode::Char('e') if !ctrl => {
+            verbose_export_field(state, app);
+            app.overlay = Some(app::Overlay::Verbose(state.clone()));
+        }
+        _ => app.overlay = Some(app::Overlay::Verbose(state.clone())),
+    }
+}
+
+/// Export the `/verbose` inspector's currently-selected field to a temp file under
+/// `repo_root` (S7; mirrors `clipboard::export_action` id 2 / tui_v3 `e` →
+/// `export_to_temp`). The filename carries the record's `t{id}` + the field name.
+fn verbose_export_field(state: &app::VerboseState, app: &mut AppState) {
+    let Some(rec_id) = app.tool_audit.get(state.selected).map(|r| r.id) else {
+        return;
+    };
+    let field = i18n::t(app.lang, state.field.label_key());
+    let body = state.current_field_text(&app.tool_audit).unwrap_or("").to_string();
+    let fname = format!("tui_v4_tool_t{}_{}_{}.txt", rec_id, field, std::process::id());
+    let path = app.repo_root.join(&fname);
+    match std::fs::write(&path, &body) {
+        Ok(()) => app.push_notice(format!(
+            "{} {}",
+            i18n::t(app.lang, "verbose.exported"),
+            path.display()
+        )),
+        Err(e) => app.push_notice(format!("{}: {e}", i18n::t(app.lang, "verbose.export.failed"))),
     }
 }
 
@@ -620,5 +708,99 @@ mod tests {
                     && args == "/temp/model_responses/model_responses_777.txt")
         });
         assert!(restored, "Enter routes Command{{restore}} → handle_restore path");
+    }
+
+    /// S7 LIVE styled honest-check of the `/verbose` INTERACTIVE inspector. Seeds
+    /// two tool records, opens the overlay, and renders it through the REAL overlay
+    /// dispatch (`components::overlay::render`) onto a styled `TestBackend`; then
+    /// drives the SAME key fn the loop calls (`handle_overlay_key`). Asserts: (1)
+    /// the list shows BOTH tool names + a `▌` selection marker on the FIRST row +
+    /// the detail pane shows the result field's content; (2) Down moves the marker
+    /// to the SECOND tool's row (off the first); (3) Enter changes the visible
+    /// detail heading from the result field to the args field.
+    #[test]
+    fn verbose_inspector_interactive_styled_path() {
+        use crate::render::chip::ToolStatus;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        use ratatui::Terminal;
+
+        let theme = crate::theme::Theme::default_theme();
+        let (w, h) = (96u16, 32u16);
+
+        let mut app = AppState::new();
+        app.push_tool_audit(
+            "web_scan".into(),
+            "{\"tabs_only\": true}".into(),
+            "3 tabs scanned".into(),
+            ToolStatus::Ok,
+            "3 tabs scanned\nfull raw body".into(),
+        );
+        app.push_tool_audit(
+            "file_read".into(),
+            "config.toml".into(),
+            "port = 8080".into(),
+            ToolStatus::Ok,
+            "port = 8080\nhost = localhost".into(),
+        );
+        app.overlay = Some(app::Overlay::Verbose(app::VerboseState::default()));
+
+        // Render the overlay through the real dispatch onto a styled backend, then
+        // return the screen rows (one String per terminal row).
+        let render_rows = |app: &AppState| -> Vec<String> {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                crate::components::overlay::render(
+                    f,
+                    Rect::new(0, 0, w, h),
+                    app.overlay.as_ref().unwrap(),
+                    app,
+                    &theme,
+                    1000,
+                )
+            })
+            .unwrap();
+            let buf = term.backend().buffer();
+            (0..h as usize)
+                .map(|y| {
+                    (0..w as usize)
+                        .map(|x| buf.content()[y * w as usize + x].symbol())
+                        .collect::<String>()
+                })
+                .collect()
+        };
+
+        // (1) Both names + a selection marker on the FIRST tool's row + the result
+        // field's content in the detail pane.
+        let rows = render_rows(&app);
+        let screen = rows.join("\n");
+        assert!(screen.contains("web_scan"), "list shows the 1st tool:\n{screen}");
+        assert!(screen.contains("file_read"), "list shows the 2nd tool:\n{screen}");
+        assert!(screen.contains('▌'), "a selection marker is drawn:\n{screen}");
+        // The marker sits on the FIRST tool's row (default selection = 0).
+        assert!(row_with2(&rows, "web_scan").contains('▌'), "marker on the 1st tool row initially");
+        assert!(!row_with2(&rows, "file_read").contains('▌'), "marker NOT on the 2nd tool row yet");
+        // The detail heading is the `result` field, and its content shows.
+        assert!(screen.contains("result"), "detail heading is the result field:\n{screen}");
+        assert!(screen.contains("3 tabs scanned"), "detail shows the selected result content");
+
+        // (2) Down moves the marker to the SECOND tool (same fn the loop calls).
+        handle_overlay_key(press(KeyCode::Down), &mut app);
+        let rows = render_rows(&app);
+        assert!(row_with2(&rows, "file_read").contains('▌'), "Down moved the marker to the 2nd tool");
+        assert!(!row_with2(&rows, "web_scan").contains('▌'), "marker left the 1st tool row");
+        // The detail now shows the 2nd tool's result.
+        assert!(rows.join("\n").contains("port = 8080"), "detail follows the selection");
+
+        // (3) Enter cycles the visible field heading result → args.
+        handle_overlay_key(press(KeyCode::Enter), &mut app);
+        let screen = render_rows(&app).join("\n");
+        assert!(screen.contains("args"), "Enter switched the detail heading to args:\n{screen}");
+        assert!(screen.contains("config.toml"), "the args field content shows after Enter");
+    }
+
+    /// Row-scan helper for the styled `/verbose` assertions.
+    fn row_with2(rows: &[String], needle: &str) -> String {
+        rows.iter().find(|r| r.contains(needle)).cloned().unwrap_or_default()
     }
 }

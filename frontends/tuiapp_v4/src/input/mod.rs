@@ -60,8 +60,10 @@ pub enum ComposerAction {
     None,
     /// The buffer/cursor changed; repaint the composer. (Most edits.)
     Changed,
-    /// Submit a NORMAL message. `text` is already expanded (paste placeholders →
-    /// payloads; `@path` left for the app to expand against the real root).
+    /// Submit a NORMAL message. `text` is already expanded — paste placeholders are
+    /// restored to their payloads (text inline; `[Image #N]`/`[File #N]` → their
+    /// PATH inline, the tuiapp_v2/v3 model where the image travels as its path in the
+    /// prompt and GA reads the file); `@path` is left for the app to expand.
     Submit { text: String },
     /// Run a `!cmd` host-shell line. `cmd` is the command body (bang stripped).
     Shell { cmd: String },
@@ -296,23 +298,16 @@ impl Composer {
             self.paste = PasteStore::new();
             return ComposerAction::Shell { cmd };
         }
-        // Normal: expand paste placeholders to payloads (the app then expands
-        // `@path` against the real root + collects images from the store first).
+        // Normal: expand every placeholder INLINE — `[Image #N]` and `[File #N]`
+        // both restore their PATH into the prompt text (the tuiapp_v2 / tui_v3 model;
+        // the image travels as its path, GA reads the file). No `Submit.images`
+        // base64 (that route needs a GA-core consumer). The app expands `@path`
+        // against the real root next.
         let expanded = self.paste.expand(&raw);
         self.history.push(&raw);
         self.clear_buffer();
-        // NOTE: the app reads `self.paste.collect_images(&raw)` BEFORE we reset;
-        // `submit_images` exposes that, so reset the store here is safe because
-        // the app calls images() then submit(); we keep the store until reset.
         self.paste = PasteStore::new();
         ComposerAction::Submit { text: expanded }
-    }
-
-    /// The image paths the CURRENT buffer references (Submit.images). The app
-    /// calls this just before `submit()` (which resets the store).
-    #[allow(dead_code)] // image attachment wires through here in Phase 3.
-    pub fn submit_images(&self) -> Vec<String> {
-        self.paste.collect_images(&self.text)
     }
 
     /// Backspace: delete the selection, else a whole adjacent placeholder, else
@@ -497,6 +492,18 @@ impl Composer {
     /// Ctrl+V — paste `text` (folds large / multi-line via [`Composer::type_str`]).
     pub fn paste(&mut self, text: &str) -> ComposerAction {
         self.type_str(text)
+    }
+
+    /// Attach an on-disk image `path` as an `[Image #N]` placeholder (S5): used by
+    /// Ctrl+V when the clipboard holds a bitmap we just wrote to a temp PNG, so the
+    /// image folds + collects on submit regardless of the path's length (unlike a
+    /// pasted path string, which only folds past the paste threshold). Returns the
+    /// assigned id `N` for the "Image pasted (#N)" notice. Snapshots (undoable).
+    pub fn attach_image(&mut self, path: &str) -> u32 {
+        let r = self.paste.fold_image(path);
+        let token = r.insert;
+        self.insert(&token);
+        r.id
     }
 
     /// Ctrl+Z — undo one step.
@@ -879,6 +886,35 @@ mod tests {
         let act = c.submit();
         assert_eq!(act, ComposerAction::Shell { cmd: "ls -la".into() });
         assert!(c.is_empty());
+    }
+
+    /// S5 (R6 path model) — `attach_image` folds a temp-PNG path into an `[Image #N]`
+    /// placeholder (the Ctrl+V clipboard-bitmap route, which must fold regardless of
+    /// the path's length), and `submit()` then EXPANDS that placeholder to the PATH
+    /// INLINE in the submitted text (the tuiapp_v2/tui_v3 model — the image travels as
+    /// its path in the prompt, GA reads the file; no base64 `Submit.images`). The OS
+    /// clipboard read is effectful + lives behind `read_clipboard_image`.
+    #[test]
+    fn attach_image_folds_placeholder_and_submit_inlines_path() {
+        let mut c = Composer::new();
+        c.type_str("see this ");
+        // A SHORT path (under the paste-fold threshold) — `type_str` would NOT fold
+        // it, but `attach_image` always does.
+        let path = "temp/tui_v4_paste_42_0.png";
+        let id = c.attach_image(path);
+        assert_eq!(id, 1, "first attachment gets id #1");
+        assert!(c.text().contains("[Image #1]"), "buffer holds the placeholder, got {:?}", c.text());
+        assert!(!c.text().contains(".png"), "the raw path is NOT inlined into the buffer (folded)");
+
+        // Submit EXPANDS the placeholder to the path inline (v2/v3 path model).
+        match c.submit() {
+            ComposerAction::Submit { text } => {
+                assert!(!text.contains("[Image #1]"), "placeholder expanded out of submitted text");
+                assert!(text.contains(path), "the image PATH is inlined into submitted text: {text:?}");
+                assert!(text.contains("see this"), "the surrounding prose survives");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
     }
 
     #[test]

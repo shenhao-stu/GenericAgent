@@ -39,7 +39,7 @@ use app_event::AppEvent;
 use bridge::{BridgeEvent, BridgeOptions};
 use theme::Theme;
 
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.6.0";
 
 /// The full terminal area (origin `(0,0)`, current size) — what `frame.area()`
 /// reports for a fullscreen viewport. Read BEFORE `terminal.draw` so the loop can
@@ -222,6 +222,10 @@ fn run_dump_frame(scenario: &str) -> Result<()> {
             llm: Some("codex-pro".into()),
             model_real: Some("gpt-5.5".into()),
             context_percent: Some(48.0),
+            // Raw char counts (S4) so the dump shows the footer's ctx fill bar +
+            // `Nk/Mk` readout: 96000/200000 chars ≈ 48% (the honest GA trim metric).
+            context_used: Some(96_000),
+            context_limit: Some(200_000),
             tokens: Some(1574),
             input_tokens: Some(1234),
             output_tokens: Some(340),

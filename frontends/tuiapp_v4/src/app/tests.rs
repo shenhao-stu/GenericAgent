@@ -68,6 +68,8 @@ fn ready_then_failover_status_updates_llm_identity() {
             llm: Some("getoken_20x".into()),
             model_real: Some("claude-opus-4-8".into()),
             context_percent: None,
+            context_used: None,
+            context_limit: None,
             tokens: None,
             input_tokens: None,
             output_tokens: None,
@@ -93,6 +95,8 @@ fn ready_then_failover_status_updates_llm_identity() {
             llm: None,
             model_real: None,
             context_percent: Some(50.0),
+            context_used: None,
+            context_limit: None,
             tokens: None,
             input_tokens: None,
             output_tokens: None,
@@ -445,7 +449,7 @@ fn message_end_harvests_tool_audit() {
         0,
     );
     assert!(
-        app.tool_audit.iter().any(|l| l.contains("file_read")),
+        app.tool_audit.iter().any(|r| r.name.contains("file_read")),
         "the finalized assistant block's tool call lands in the audit: {:?}",
         app.tool_audit
     );
@@ -1482,6 +1486,66 @@ fn live_command_border_restyles_at_mono_like_shell_bang() {
     }
 
     // The 4 architecture parity invariants stay green with a command border present.
+    assert_parity_invariants();
+}
+
+/// S3 HONEST CHECK — the `/goal` command word STYLES WHILE BEING TYPED on the LIVE
+/// styled path: with just `/goal` in the composer (no trailing space, caret at end)
+/// the rendered `/goal` glyph cells carry a NON-DEFAULT fg AND the first vs last cell
+/// colors DIFFER (the gradient is visible, not a flat run) — proving both the relaxed
+/// cursor-in-token guard (effect lit immediately, not only after a space) and the
+/// strong per-char Goal gradient. Truecolor caps so no downstream mono-strip applies.
+#[test]
+fn live_typing_goal_styles_command_word_gradient() {
+    use crate::components::cockpit::split_cockpit;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    let theme = Theme::default_theme();
+    let (w, h) = (100u16, 24u16);
+    let mut app = AppState::new();
+    app.effects = crate::effects::EffectsEngine::new(crate::effects::ColorCaps::from_env_values(
+        false, "truecolor", "xterm-256color",
+    ));
+    // Type the bare command — NO trailing space, caret sits at end-of-word.
+    app.composer.type_str("/goal");
+
+    let layout = split_cockpit(&app, Rect::new(0, 0, w, h));
+    let c = layout.composer;
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    app.prepare_frame(Rect::new(0, 0, w, h), &theme);
+    let app_ref: &AppState = &app;
+    term.draw(|f| crate::components::render(f, app_ref, &theme, 0)).unwrap();
+
+    let buf = term.backend().buffer();
+    // The composer's first inner text row (just below the top border line).
+    let row = c.y + 1;
+    // Walk the row and collect the fg of each cell whose glyph is one of `/goal`'s
+    // chars, in the contiguous `/ g o a l` run. The mark `❯ ` precedes it.
+    let want: Vec<char> = "/goal".chars().collect();
+    let mut fgs: Vec<ratatui::style::Color> = Vec::new();
+    let mut wi = 0usize;
+    for x in c.x..(c.x + c.width) {
+        let cell = &buf.content()[(row as usize) * w as usize + x as usize];
+        let sym = cell.symbol().chars().next().unwrap_or(' ');
+        if wi < want.len() && sym == want[wi] {
+            fgs.push(cell.fg);
+            wi += 1;
+        } else if wi > 0 && wi < want.len() {
+            // The run must be contiguous; a break before completing it is a failure.
+            break;
+        }
+    }
+    assert_eq!(wi, want.len(), "all of `/goal` rendered contiguously in the composer row");
+    // Every `/goal` glyph carries an explicit RGB fg (the effect is lit while typing).
+    for fg in &fgs {
+        assert!(matches!(fg, ratatui::style::Color::Rgb(..)), "typed `/goal` char fg must be set: {fg:?}");
+    }
+    // The gradient is visible: the first and last `/goal` cells differ in color.
+    assert_ne!(fgs.first(), fgs.last(), "the `/goal` gradient is visible while typing (first != last)");
+
+    // The 4 architecture parity invariants stay green.
     assert_parity_invariants();
 }
 

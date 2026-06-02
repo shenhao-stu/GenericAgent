@@ -212,32 +212,123 @@ pub(crate) fn render_cost(frame: &mut Frame, area: Rect, app: &AppState, theme: 
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The full-screen tool-call audit (`/verbose` `/tools` `/trace`): the tail of the
-/// session's tool-call lines.
-pub(crate) fn render_verbose(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
+/// The INTERACTIVE tool-call inspector (`/verbose` `/tools` `/trace`; S7, tui_v3
+/// `_verbose_view`). A TWO-PANE layout over [`AppState::tool_audit`]: a top LIST
+/// of every captured tool call (`{marker} t{id} {name}  {status}`, the selected
+/// row marked with `▌` + its name bold, each colored by the chip status) and a
+/// bottom DETAIL pane showing the SELECTED record's current field — Result / Args
+/// / Raw — under a heading, scrolled by `state.detail_scroll`. The key handler
+/// (`input::views`) drives `state` (↑/↓ select, PgUp/PgDn scroll, Enter cycle
+/// field, `c` copy, `e` export). No hardcoded colors.
+pub(crate) fn render_verbose(
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    state: &crate::app::VerboseState,
+    theme: &Theme,
+    lang: Lang,
+) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+
     frame.render_widget(Clear, area);
-    let block = titled_block("Tool-call audit · /verbose", theme);
+    let block = titled_block(i18n::t(lang, "verbose.title"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let cap = inner.height.saturating_sub(1) as usize;
-    let mut lines: Vec<Line> = Vec::new();
     if app.tool_audit.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no tool calls yet this session.",
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                i18n::t(lang, "verbose.empty"),
+                Style::default().fg(theme.color(Token::Dim)),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    // The selection + field are clamped here too (defensive) so a stale state can
+    // never index past the data even if a record was just drained.
+    let sel = state.selected.min(app.tool_audit.len() - 1);
+    let field_key = state.field.label_key();
+
+    // Hint line: the active field + the key legend (tui_v3 `verbose.hint`).
+    let hint = Line::from(Span::styled(
+        format!("{} {} · {}", i18n::t(lang, "verbose.field"), i18n::t(lang, field_key), i18n::t(lang, "verbose.hint")),
+        Style::default().fg(theme.color(Token::Dim)),
+    ));
+
+    // Split: hint row, then a LIST pane (≈⅓, ≥3 rows) over a DETAIL pane (the rest).
+    let avail = inner.height.saturating_sub(1);
+    let list_h = (app.tool_audit.len() as u16)
+        .min((avail / 3).max(3))
+        .min(avail.saturating_sub(1).max(1));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(list_h),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+    frame.render_widget(Paragraph::new(hint), chunks[0]);
+
+    // -- LIST pane: window the rows around the selection (tui_v3 `lo`). --------
+    let list_rows = chunks[1].height as usize;
+    let lo = sel
+        .saturating_sub(list_rows / 2)
+        .min(app.tool_audit.len().saturating_sub(list_rows));
+    let mut list_lines: Vec<Line> = Vec::new();
+    for (off, rec) in app.tool_audit[lo..].iter().take(list_rows).enumerate() {
+        let idx = lo + off;
+        let selected = idx == sel;
+        let marker = if selected { "▌" } else { " " };
+        let status_tok = rec.status.token();
+        let (badge, _) = rec.status.badge();
+        let name_style = {
+            let s = Style::default().fg(theme.color(Token::Text));
+            if selected { s.add_modifier(Modifier::BOLD) } else { s }
+        };
+        list_lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), Style::default().fg(theme.color(Token::Claude))),
+            Span::styled(format!("t{:<3} ", rec.id), Style::default().fg(theme.color(Token::Dim))),
+            Span::styled(format!("{:<22}", clip_to(&rec.name, 22)), name_style),
+            Span::styled(format!(" {badge}"), Style::default().fg(theme.color(status_tok))),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(list_lines), chunks[1]);
+
+    // -- DETAIL pane: the selected record's current field, under a heading. ----
+    let detail = chunks[2];
+    let detail_w = detail.width.max(1) as usize;
+    let rec = &app.tool_audit[sel];
+    let field_text = match state.field {
+        crate::app::VerboseField::Result => &rec.result,
+        crate::app::VerboseField::Args => &rec.args,
+        crate::app::VerboseField::Raw => &rec.raw,
+    };
+    let mut detail_lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!("{} t{}", i18n::t(lang, field_key), rec.id),
+        Style::default().fg(theme.color(Token::Claude)).add_modifier(Modifier::BOLD),
+    ))];
+    if field_text.trim().is_empty() {
+        detail_lines.push(Line::from(Span::styled(
+            i18n::t(lang, "verbose.field.empty"),
             Style::default().fg(theme.color(Token::Dim)),
         )));
     } else {
-        let start = app.tool_audit.len().saturating_sub(cap);
-        for (i, line) in app.tool_audit[start..].iter().enumerate() {
-            let n = start + i + 1;
-            lines.push(Line::from(vec![
-                Span::styled(format!("{n:>4} "), Style::default().fg(theme.color(Token::Dim))),
-                Span::styled(line.clone(), Style::default().fg(theme.color(Token::Text))),
-            ]));
+        for raw_line in field_text.split('\n') {
+            detail_lines.push(Line::from(Span::styled(
+                clip_to(raw_line, detail_w),
+                Style::default().fg(theme.color(Token::Text)),
+            )));
         }
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Clamp the scroll to the body height so PgDn can't run off the end (the body
+    // is `detail_lines.len() - 1` after the heading row).
+    let body = detail_lines.len().saturating_sub(1);
+    let max_scroll = (body as u16).saturating_sub(detail.height.saturating_sub(1).max(1));
+    let scroll = state.detail_scroll.min(max_scroll);
+    frame.render_widget(Paragraph::new(detail_lines).scroll((scroll, 0)), detail);
 }
 
 /// The `/btw` side-answer card: `querying…` then the answer, above the composer.

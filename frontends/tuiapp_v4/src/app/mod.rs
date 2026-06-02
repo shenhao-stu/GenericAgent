@@ -14,7 +14,10 @@ mod reducer;
 pub mod session;
 mod types;
 
-pub use types::{Block, ConnStatus, CostBreakdown, Overlay, PendingAsk, RenameState, Role, View};
+pub use types::{
+    Block, ConnStatus, CostBreakdown, Overlay, PendingAsk, RenameState, Role, ToolAuditRecord,
+    VerboseField, VerboseState, View,
+};
 
 use std::path::PathBuf;
 
@@ -122,6 +125,12 @@ pub struct AppState {
     pub should_quit: bool,
     /// The last context-window percent reported (footer).
     pub context_percent: Option<f64>,
+    /// Raw context-window char counts (S4) — the HONEST GA trim metric (chars, not
+    /// tokens). They feed the footer's `ctx` fill bar + `Nk/Mk` readout. `None`
+    /// until a `Status` frame carries them (an older bridge omits them → bar shows
+    /// `—`). Distinct from `context_percent`, which keeps its `context_win*3` meaning.
+    pub context_used: Option<u64>,
+    pub context_limit: Option<u64>,
     /// Live token count for the current/last turn (footer right side).
     pub tokens: Option<u64>,
     /// The LAST single LLM-call input / output token sizes (the spinner's
@@ -160,9 +169,14 @@ pub struct AppState {
     /// The per-turn token cost breakdown for the `/cost` report (input / output /
     /// cache / context%). Accumulated from `Status` frames + the final turn.
     pub cost: CostBreakdown,
-    /// The full tool-call audit trail for `/verbose` (every tool chip line we have
-    /// seen this session). Append-only; the overlay paints the tail.
-    pub tool_audit: Vec<String>,
+    /// The full tool-call audit trail for the `/verbose` inspector (S7): one
+    /// [`ToolAuditRecord`] per `🛠️` chip seen this session, carrying
+    /// name/args/result/status/raw (tui_v3 `ToolRecord`). Append-only (bounded);
+    /// the two-pane inspector lists them + shows the selected record's field.
+    pub tool_audit: Vec<ToolAuditRecord>,
+    /// Monotonic id source for `tool_audit` records (1-based; never reused, so a
+    /// bounded drain of the oldest records leaves the survivors' `t{id}` stable).
+    pub(in crate::app) next_audit_id: u32,
     /// A DEBUG-ONLY ring of suppressed bridge diagnostics (stderr / parse-noise /
     /// fatal-exit reasons). NEVER shown in the transcript (§c) — kept so a
     /// developer / a future `/trace` debug pane can inspect failover chatter
@@ -271,6 +285,8 @@ impl Default for AppState {
             ask_queue: std::collections::VecDeque::new(),
             should_quit: false,
             context_percent: None,
+            context_used: None,
+            context_limit: None,
             tokens: None,
             tok_in: None,
             tok_out: None,
@@ -287,6 +303,7 @@ impl Default for AppState {
             overlay: None,
             cost: CostBreakdown::default(),
             tool_audit: Vec::new(),
+            next_audit_id: 0,
             bridge_debug: Vec::new(),
             workflow_panel: crate::workflow::panel::WorkflowPanel::new(),
             workflow_snapshot: crate::workflow::schema::WorkflowSnapshot::default(),
@@ -487,11 +504,29 @@ impl AppState {
         }
     }
 
-    /// Append a tool-call line to the `/verbose` audit trail (called when a tool
-    /// chip is observed). Bounded so a long session can't grow unboundedly.
-    pub fn push_tool_audit(&mut self, line: String) {
+    /// Append a captured tool call to the `/verbose` inspector trail (S7; called
+    /// at MessageEnd when an assistant block's chips are harvested). The id is
+    /// assigned session-wide + monotonic here (1-based, tui_v3 `t{id}`) so a
+    /// later drain of the oldest records never renumbers the survivors. `result`
+    /// is the clipped preview, `raw` the full text. Bounded.
+    pub fn push_tool_audit(
+        &mut self,
+        name: String,
+        args: String,
+        result: String,
+        status: crate::render::chip::ToolStatus,
+        raw: String,
+    ) {
         const MAX_AUDIT: usize = 2000;
-        self.tool_audit.push(line);
+        self.next_audit_id = self.next_audit_id.saturating_add(1);
+        self.tool_audit.push(ToolAuditRecord {
+            id: self.next_audit_id,
+            name,
+            args,
+            result,
+            status,
+            raw,
+        });
         if self.tool_audit.len() > MAX_AUDIT {
             let overflow = self.tool_audit.len() - MAX_AUDIT;
             self.tool_audit.drain(0..overflow);
@@ -523,7 +558,40 @@ impl AppState {
     /// window without re-snapshotting. `theme` is needed because assistant blocks
     /// snapshot their MARKDOWN-rendered plain projection (so the wrap cache counts
     /// the rows the styled draw produces — see [`Block::to_render_block`]).
+    // Kept as the single-call `(width, height)` seam the render-plane tests drive
+    // directly (tests.rs / fold_hit.rs); `prepare_frame` now drives the two halves
+    // (`sync_wrap_cache` + `viewport.resize`) around the hug-top split instead, so this
+    // is unused in a non-test build.
+    #[allow(dead_code)]
     pub fn sync_transcript(&mut self, width: u16, height: usize, theme: &Theme) -> Vec<RenderBlock> {
+        // Sync the WIDTH-keyed render plane (wrap cache + node-hit table) first, then
+        // re-derive the viewport for `height` from the SAME logical anchor. Splitting
+        // these two lets [`AppState::prepare_frame`] interpose the hug-top layout split
+        // BETWEEN them (sync the cache at the full width → read `total_visual_lines()`
+        // in `split_cockpit` → resize the viewport to the final transcript height) so
+        // BOTH `split_cockpit` calls (prepare_frame + render) observe the same cache.
+        let (render_blocks, did_rewidth) = self.sync_wrap_cache(width, theme);
+        if did_rewidth {
+            // Width / fold-all / per-node-fold changed: re-derive the viewport from the
+            // anchor (P1) — always re-clamp at the new geometry.
+            self.viewport.resize(height, &self.wrap_cache);
+        } else if height != self.viewport.height() {
+            // Same width + fold, height changed: just re-clamp.
+            self.viewport.resize(height, &self.wrap_cache);
+        }
+        render_blocks
+    }
+
+    /// Sync ONLY the width-keyed render plane: rebuild/reuse the wrap cache for the
+    /// transcript's `width` and rebuild the node-hit table — WITHOUT touching the
+    /// viewport (the height-dependent part). Returns `(render_blocks, did_rewidth)`
+    /// where `did_rewidth` is `true` when a width / fold change forced a full rewidth
+    /// (the caller then re-derives the viewport from the anchor; otherwise it only
+    /// re-clamps when the height actually changed). Factored out of [`sync_transcript`]
+    /// so `prepare_frame` can sync the cache, run the hug-top split (which reads
+    /// `wrap_cache.total_visual_lines()`), and only THEN resize the viewport — keeping
+    /// the two `split_cockpit` calls byte-identical (the geometry contract, P1).
+    fn sync_wrap_cache(&mut self, width: u16, theme: &Theme) -> (Vec<RenderBlock>, bool) {
         let width = width.max(1);
         let fold_all = self.fold_all;
         // The assistant chip boxes are sized to the transcript width, so they are
@@ -539,12 +607,13 @@ impl AppState {
             .collect();
 
         // A width / fold-all / per-node-fold change invalidates the whole cache (all
-        // alter the projected rows). Width also re-derives the viewport from the
-        // anchor (P1). A per-node fold toggle bumps `fold_epoch` WITHOUT bumping any
-        // block `rev`, so the `(id, rev)` reuse can't see the projection changed — we
-        // must drop the per-block memo so every block reflows from the new projection.
+        // alter the projected rows). A per-node fold toggle bumps `fold_epoch` WITHOUT
+        // bumping any block `rev`, so the `(id, rev)` reuse can't see the projection
+        // changed — we must drop the per-block memo so every block reflows from the new
+        // projection.
         let fold_changed = fold_all != self.last_fold_all || self.fold_epoch != self.last_fold_epoch;
-        if width != self.last_width || fold_changed {
+        let did_rewidth = width != self.last_width || fold_changed;
+        if did_rewidth {
             if width == self.wrap_cache.width() && fold_changed {
                 // Same width, only the fold projection changed: clear the per-block
                 // memo so `rewidth` (a no-op clearer at an unchanged width) can't keep
@@ -552,19 +621,15 @@ impl AppState {
                 self.wrap_cache.invalidate_all();
             }
             self.wrap_cache.rewidth(width, &render_blocks);
-            self.viewport.resize(height, &self.wrap_cache);
             self.last_width = width;
             self.last_fold_all = fold_all;
             self.last_fold_epoch = self.fold_epoch;
         } else {
             // Same width + fold: reflow only changed blocks (streaming → O(1)).
             self.wrap_cache.sync(&render_blocks);
-            if height != self.viewport.height() {
-                self.viewport.resize(height, &self.wrap_cache);
-            }
         }
         self.rebuild_node_hit(theme, fold_all, width);
-        render_blocks
+        (render_blocks, did_rewidth)
     }
 
     /// Apply the per-frame STATE WRITES that render used to do mid-draw, hoisted out
@@ -578,8 +643,21 @@ impl AppState {
     pub fn prepare_frame(&mut self, area: ratatui::layout::Rect, theme: &Theme) {
         self.set_term_size(area.width, area.height);
         if self.view == View::Cockpit {
+            // GEOMETRY CONTRACT (Slice S1). The hug-top split sizes the transcript to
+            // `wrap_cache.total_visual_lines()`, so the cache MUST be synced BEFORE the
+            // split — but the split also decides the transcript HEIGHT used to resize
+            // the viewport. Break the cycle using the fact that the transcript is a
+            // full-width vertical split (`transcript.width == area.width`):
+            //   1. sync the wrap cache at `area.width` (no viewport touch yet);
+            //   2. run `split_cockpit`, which now reads the freshly-synced
+            //      `total_visual_lines()` to choose hug-top vs overflow → final height;
+            //   3. resize the viewport to that final `transcript.height`.
+            // render() calls `split_cockpit` again AFTER this with NO intervening cache
+            // mutation (render is pure, P11), so it observes the identical
+            // `total_visual_lines()` → the two splits can never drift.
+            self.sync_wrap_cache(area.width, theme);
             let transcript = crate::components::cockpit::split_cockpit(self, area).transcript;
-            self.sync_transcript(transcript.width, transcript.height as usize, theme);
+            self.viewport.resize(transcript.height as usize, &self.wrap_cache);
         }
     }
 

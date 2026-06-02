@@ -467,6 +467,12 @@ class Bridge:
                 used = ct.current_input_chars(be)
                 if cap > 0:
                     frame["context_percent"] = float(min(100.0, used * 100.0 / cap))
+                # ADDITIVE (S4): raw char counts so the footer can draw a fill bar +
+                # a `Nk/Mk` readout (the real GA trim metric is CHARS, not tokens).
+                # Optional — an older UI ignores unknown keys; a newer UI tolerates
+                # their absence (None) and falls back to the bare percent.
+                frame["context_used"] = int(used)
+                frame["context_limit"] = int(cap)
         except Exception as exc:
             _eprint("[ga_bridge] status payload failed: %s" % exc)
         return frame

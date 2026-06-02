@@ -1,3 +1,7 @@
+> **实现状态 — Round 6（2026-06-03）：实现完成 + Opus 对抗 Monitor（M1-M5）全 CONFIRMED。v0.6.0（379 测试 / 0 失败 / 0 警告，release exe 已出）。** 逐项：① 模型输出**顶部对齐**（content+composer hug-top，下方留白；撤销 R5 的 bottom-anchor）√ · 去掉丑陋且重复的 `↳`（`▾`/`▸` 折叠头为唯一摘要，R1 GAP A）√ · `/goal /hive /conductor` 命令字符特效**打字即现**且各异（同 `/morphling`）√ · 底栏 `Channel: \| Model: \| Effort: \| ctx: [█…░] Nk/Mk (P%) \| branch: \| mouse:`（ctx 进度条为头牌，窄屏先丢尾字段）√ · **图片/文件复制**=tuiapp_v2/tui_v3 的**路径模型**：`[Image #N]`/`[File #N]` 提交时展开为**路径内联**进 prompt（GA 读文件），Ctrl+V 截图→临时 PNG；**不走 base64/Submit.images**（那条需改 GA core，已弃）√ · `/verbose` 恢复 v3 交互式检查器（R1 GAP B：list/detail + 选择/滚动/切字段/复制/导出）√ · `/continue` 预览修复**移植自上游** `continue_cmd.py`（脏 summary 拒绝 + last_user 兜底）√ · 审计：命令/快捷键是 v2∪v3 **完整超集（0 缺口）**。**上游 lsdefine/main 已合并。** Monitor M5 认证 R5 死循环不会重演。计划 `IMPLEMENTATION_PLAN_R6.md`，spec `recon/round6/R1..R2`。
+>
+> **Round-6 关键教训：** TUI 功能看似要改 GA core 时，先查 tuiapp_v2/tui_v3 既有实现 —— 图片/文件粘贴是**路径进 prompt**（`put_task(text)`，GA 读文件），不是 base64 多模态；走 base64 会白白逼一次 `agentmain.py` 红线改动。
+
 > **实现状态 — Round 5（2026-06-03）：实现完成 + Opus 对抗 Monitor 全 CONFIRMED。v0.5.0（370 测试 / 0 失败 / 0 警告，release exe 已出）。**
 > **本轮重大事故并已修复：S3 由 Sonnet agent 写入的 `extract_block_math_paragraphs` 死循环（EOF 时 `continue` 不前进 `i`）→ 每次 markdown 渲染都卡死 → cargo test 测试二进制 100% CPU 把用户电脑卡死。已 `break` 修复（render.rs:125）；实现/收尾改用 Opus、测试 gate 全部 `timeout` 自杀、单 cargo 串行。Monitor 用独立复刻在 empty/EOF/无换行 输入上验证所有循环必终止。**
 >

@@ -137,14 +137,68 @@ pub(crate) fn render_done_line(frame: &mut Frame, area: Rect, app: &AppState, th
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// ROW 1 (below the composer, Q7): runtime SESSION INFO — `llm · model · effort ·
-/// ctx · branch`, left-aligned with dim ` · ` separators. The connection chip is
-/// folded onto the TAIL when not connected (N1 "never a silent disconnect" — this
-/// row replaced the old footer that carried the chip). The chip turns `Token::Error`
-/// on a disconnect / `Token::Warning` while connecting.
+/// The ctx progress-bar width (S4) — a `[████░░░░░░░░░░░░]` fill 16 cells wide.
+const CTX_BAR_W: usize = 16;
+
+/// Build the `ctx` field's spans (S4): a `[████…░░░░]` bar filled proportional to
+/// `context_percent`, then a ` {used_k}/{limit_k} ({P}%)` readout (k = chars/1000,
+/// rounded; the HONEST GA trim metric is CHARS). `with_bar=false` drops the bar (the
+/// narrow-terminal fallback) and keeps just the readout. When no context data has
+/// arrived the bar is all-empty and the readout is a bare `—`.
+fn ctx_field_spans(app: &AppState, theme: &Theme, with_bar: bool) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(theme.color(Token::Dim));
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let pct = app.context_percent;
+    if with_bar {
+        // Fill `filled` of `CTX_BAR_W` cells; clamp the percent to [0,100] so a
+        // stray over-100 reading can't overrun the bar (bounded by `.min`).
+        let filled = pct
+            .map(|p| ((p.clamp(0.0, 100.0) / 100.0) * CTX_BAR_W as f64).round() as usize)
+            .unwrap_or(0)
+            .min(CTX_BAR_W);
+        // The fill brightens (Suggestion) so the eye reads the gauge; the empty
+        // track + brackets stay dim chrome. `█`×filled + `░`×(W-filled), bounded by
+        // the constant width (no unbounded loop).
+        out.push(Span::styled("[".to_string(), dim));
+        out.push(Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(theme.color(Token::Suggestion)),
+        ));
+        out.push(Span::styled("░".repeat(CTX_BAR_W - filled), dim));
+        out.push(Span::styled("] ".to_string(), dim));
+    }
+    match (app.context_used, app.context_limit, pct) {
+        (Some(used), Some(limit), p) => {
+            let used_k = (used as f64 / 1000.0).round() as u64;
+            let limit_k = (limit as f64 / 1000.0).round() as u64;
+            let pr = p.unwrap_or(0.0).round();
+            out.push(Span::styled(
+                format!("{used_k}k/{limit_k}k ({pr:.0}%)"),
+                Style::default().fg(theme.color(Token::Text)),
+            ));
+        }
+        // Char counts absent but a percent exists (an older bridge): show the %.
+        (_, _, Some(p)) => {
+            out.push(Span::styled(format!("({:.0}%)", p.round()), dim));
+        }
+        // No context data at all → a bare em-dash (mirrors the old `ctx —`).
+        _ => out.push(Span::styled("—".to_string(), dim)),
+    }
+    out
+}
+
+/// ROW 1 (below the composer, Q7): runtime SESSION INFO — LABELED fields joined by
+/// dim ` | ` separators (S4): `Channel: <llm> | Model: <model> | Effort: <effort> |
+/// ctx: [████░░░░] Nk/Mk (P%) | branch: <branch> | mouse: select`. The connection
+/// chip is folded onto the TAIL when not connected (N1 "never a silent disconnect" —
+/// this row replaced the old footer that carried the chip). The chip turns
+/// `Token::Error` on a disconnect / `Token::Warning` while connecting. On a NARROW
+/// terminal the ctx bar is dropped FIRST (the readout + all labels stay legible),
+/// mirroring the spinner's progressive width-gating.
 pub(crate) fn render_session_info(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
     let dim = Style::default().fg(theme.color(Token::Dim));
-    let sep = || Span::styled("  ·  ".to_string(), dim);
+    let sep = || Span::styled(" | ".to_string(), dim);
+    let label = |key: &str| Span::styled(crate::i18n::t(app.lang, key).to_string(), dim);
     // FOOTER identity (Slice 4) = the SAME wire identity the header uses (Slice 1/2):
     // prefer `llm_name` (codex-pro) / `model_real` (gpt-5.5), falling back to the
     // routing channel / truncated `model` only when the bridge omitted them.
@@ -160,38 +214,74 @@ pub(crate) fn render_session_info(frame: &mut Frame, area: Rect, app: &AppState,
         .effort_label()
         .map(str::to_string)
         .unwrap_or_else(|| crate::i18n::t(app.lang, "effort.none").to_string());
-    let ctx = match app.context_percent {
-        Some(p) => format!("ctx {p:.0}%"),
-        None => "ctx —".to_string(),
-    };
     let branch = app.git_branch.as_deref().unwrap_or("—");
-    let mut spans: Vec<Span> = vec![
-        Span::styled(llm, Style::default().fg(theme.color(Token::Suggestion))),
-        sep(),
-        Span::styled(model, Style::default().fg(theme.color(Token::Claude))),
-        sep(),
-        Span::styled(effort, Style::default().fg(theme.color(Token::PlanMode))),
-        sep(),
-        Span::styled(ctx, dim),
-        sep(),
-        Span::styled(branch.to_string(), Style::default().fg(theme.color(Token::Suggestion))),
-    ];
     // S1: Mouse mode indicator — dim, so it's discoverable but not distracting.
     // "mouse: select" in native mode (drag to copy); "mouse: click" in interactive.
     let mouse_label = if app.mouse_capture { "mouse: click" } else { "mouse: select" };
-    spans.push(sep());
-    spans.push(Span::styled(mouse_label.to_string(), dim));
 
-    // The connection chip lives on this row's tail (it owns the bottom chrome now
-    // that the footer is gone) so a failed bridge stays visible (N1).
-    if !matches!(app.conn, ConnStatus::Connected { .. }) {
-        let conn_tok = match &app.conn {
-            ConnStatus::Connecting => Token::Warning,
-            ConnStatus::Disconnected { .. } => Token::Error,
-            ConnStatus::Connected { .. } => Token::Success,
-        };
-        spans.push(sep());
-        spans.push(Span::styled(app.conn.label(), Style::default().fg(theme.color(conn_tok))));
+    // Build the row. The ctx BAR is the headline of this row (task 4), so it is the
+    // LAST thing dropped: progressive width-gating sheds the trailing, least-important
+    // fields FIRST (`mouse:` then `branch:`), keeping the bar; only if the core STILL
+    // overruns do we drop the bar itself. The connection chip always stays (N1).
+    let build = |with_bar: bool, with_branch: bool, with_mouse: bool| -> Vec<Span<'static>> {
+        let mut spans: Vec<Span<'static>> = vec![
+            label("footer.channel"),
+            Span::styled(llm.clone(), Style::default().fg(theme.color(Token::Suggestion))),
+            sep(),
+            label("footer.model"),
+            Span::styled(model.clone(), Style::default().fg(theme.color(Token::Claude))),
+            sep(),
+            label("footer.effort"),
+            Span::styled(effort.clone(), Style::default().fg(theme.color(Token::PlanMode))),
+            sep(),
+            label("footer.ctx_label"),
+        ];
+        spans.extend(ctx_field_spans(app, theme, with_bar));
+        if with_branch {
+            spans.push(sep());
+            spans.push(label("footer.branch"));
+            spans.push(Span::styled(branch.to_string(), Style::default().fg(theme.color(Token::Suggestion))));
+        }
+        if with_mouse {
+            spans.push(sep());
+            spans.push(Span::styled(mouse_label.to_string(), dim));
+        }
+        // The connection chip lives on this row's tail (it owns the bottom chrome now
+        // that the footer is gone) so a failed bridge stays visible (N1) — never gated.
+        if !matches!(app.conn, ConnStatus::Connected { .. }) {
+            let conn_tok = match &app.conn {
+                ConnStatus::Connecting => Token::Warning,
+                ConnStatus::Disconnected { .. } => Token::Error,
+                ConnStatus::Connected { .. } => Token::Success,
+            };
+            spans.push(sep());
+            spans.push(Span::styled(app.conn.label(), Style::default().fg(theme.color(conn_tok))));
+        }
+        spans
+    };
+
+    let row_width = |spans: &[Span]| -> usize {
+        use unicode_width::UnicodeWidthStr;
+        spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum()
+    };
+
+    // Tiered fallback (widest → narrowest): full → drop mouse → drop branch → (last
+    // resort) drop the bar. Pick the first tier that fits; the narrowest is the floor.
+    let w = area.width as usize;
+    let tiers = [
+        (true, true, true),
+        (true, true, false),  // drop `mouse:` first
+        (true, false, false), // then `branch:` — bar still kept
+        (false, false, false),// last resort: drop the bar
+    ];
+    let mut spans = build(true, true, true);
+    for (bar, br, mo) in tiers {
+        let candidate = build(bar, br, mo);
+        if row_width(&candidate) <= w {
+            spans = candidate;
+            break;
+        }
+        spans = candidate; // keep the narrowest as the floor even if it still overruns
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -277,6 +367,8 @@ mod tests {
                 model: None,
                 llm: None, model_real: None,
                 context_percent: Some(48.0),
+                context_used: None,
+                context_limit: None,
                 tokens: Some(1574),
                 input_tokens: Some(1234),
                 output_tokens: Some(340),
@@ -336,6 +428,8 @@ mod tests {
                 model: None,
                 llm: None, model_real: None,
                 context_percent: Some(48.0),
+                context_used: None,
+                context_limit: None,
                 tokens: Some(tok_in + tok_out),
                 input_tokens: Some(tok_in),
                 output_tokens: Some(tok_out),
@@ -402,8 +496,10 @@ mod tests {
     }
 
     /// Slice 4 session-info deliverable: with NO effort set the row shows the
-    /// non-thinking label (`非思考模式` in zh), `ctx 48%`, and the SAME wire identity
-    /// the header uses (`codex-pro` / `gpt-5.5`) — never the router name `MixinSession`.
+    /// non-thinking label (`非思考模式` in zh), the labeled `ctx:` field with its
+    /// `(48%)` readout, and the SAME wire identity the header uses (`codex-pro` /
+    /// `gpt-5.5`) — never the router name `MixinSession`. Rendered at 130-wide so the
+    /// full labeled row (incl. the 16-cell ctx bar) fits the zh label without clipping.
     #[test]
     fn session_info_shows_non_thinking_ctx_and_wire_identity() {
         let mut app = AppState::new();
@@ -425,6 +521,10 @@ mod tests {
                 model: None,
                 llm: None, model_real: None,
                 context_percent: Some(48.0),
+                // Seed the raw char counts (S4) so the footer can draw the ctx fill
+                // bar + `96k/200k (48%)` readout: 96000/200000 ≈ 48%.
+                context_used: Some(96_000),
+                context_limit: Some(200_000),
                 tokens: Some(100),
                 input_tokens: Some(60),
                 output_tokens: Some(40),
@@ -437,19 +537,179 @@ mod tests {
         );
         assert!(app.effort_label().is_none(), "no effort set");
 
-        let rows = cockpit_rows(&mut app, 100, 30);
+        let rows = cockpit_rows(&mut app, 130, 30);
         let info = rows
             .iter()
-            .find(|r| r.contains("ctx 48%"))
-            .expect("the session-info row carries ctx 48%");
+            .find(|r| r.contains("Channel:"))
+            .expect("the session-info row carries the labeled Channel: field");
         // The TestBackend grid renders each wide CJK glyph into 2 cells, so the
         // cell-by-cell row join interleaves spaces (`非 思 考…`); compare the zh
         // label against a space-stripped form. ASCII tokens stay contiguous.
         let dense: String = info.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(dense.contains("非思考模式"), "non-thinking label (zh): {info:?}");
+        assert!(info.contains("ctx:"), "the labeled ctx field: {info:?}");
+        assert!(info.contains("(48%)"), "the ctx percent readout: {info:?}");
         assert!(info.contains("codex-pro"), "wire llm identity: {info:?}");
         assert!(info.contains("gpt-5.5"), "wire model identity: {info:?}");
         assert!(!info.contains("MixinSession"), "router name is NOT shown: {info:?}");
+    }
+
+    /// S4 deliverable (LIVE styled path): the session-info row renders LABELED
+    /// fields joined by ` | ` separators, with a `[████░░░░]` ctx bar + a
+    /// `96k/200k (48%)` readout. Rendered at 150-wide so the full row (incl. the
+    /// 16-cell bar) fits comfortably; the wire identity (codex-pro/gpt-5.5) holds.
+    #[test]
+    fn session_info_labeled_pipe_fields_and_ctx_bar() {
+        let mut app = AppState::new();
+        app.conn = crate::app::ConnStatus::Connected {
+            model: Some("MixinSession/codex-pro|gpt-5.2|kiro".into()),
+        };
+        app.git_branch = Some("feat/tui-v4".into());
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Ready {
+                version: None,
+                model: Some("MixinSession/codex-pro|gpt-5.2|kiro".into()),
+                llm: Some("codex-pro".into()),
+                model_real: Some("gpt-5.5".into()),
+            }),
+            0,
+        );
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Status {
+                model: None,
+                llm: None,
+                model_real: None,
+                context_percent: Some(48.0),
+                context_used: Some(96_000),
+                context_limit: Some(200_000),
+                tokens: Some(100),
+                input_tokens: Some(60),
+                output_tokens: Some(40),
+                cache_tokens: None,
+                last_input: Some(60),
+                last_output: Some(40),
+                text: None,
+            }),
+            0,
+        );
+        assert!(app.effort_label().is_none(), "no effort set → non-thinking");
+
+        let rows = cockpit_rows(&mut app, 150, 30);
+        let info = rows
+            .iter()
+            .find(|r| r.contains("Channel:"))
+            .expect("the labeled session-info row");
+        // Labeled fields.
+        assert!(info.contains("Channel:"), "Channel label: {info:?}");
+        assert!(info.contains("Model:"), "Model label: {info:?}");
+        assert!(info.contains("Effort:"), "Effort label: {info:?}");
+        assert!(info.contains("ctx:"), "ctx label: {info:?}");
+        assert!(info.contains("branch:"), "branch label: {info:?}");
+        // The ctx bar: an opening `[`, the filled glyph `█`, an empty `░`, a closing
+        // `]`, and the `96k/200k (48%)` readout right after it.
+        assert!(info.contains('['), "ctx bar opens with [: {info:?}");
+        assert!(info.contains(']'), "ctx bar closes with ]: {info:?}");
+        assert!(info.contains('█'), "ctx bar has a filled cell: {info:?}");
+        assert!(info.contains('░'), "ctx bar has an empty cell: {info:?}");
+        assert!(info.contains("96k/200k (48%)"), "ctx readout: {info:?}");
+        // ` | ` pipe separators (was ` · `): at least the Channel|Model boundary.
+        assert!(info.contains(" | "), "pipe separators present: {info:?}");
+        assert!(!info.contains(" · "), "no old middot separators: {info:?}");
+        // Non-thinking label shows (en) with no effort set.
+        assert!(info.contains("non-thinking"), "non-thinking label (en): {info:?}");
+        // Wire identity (Slice 1/2) holds — NEVER the router MixinSession chain.
+        assert!(info.contains("codex-pro"), "wire llm: {info:?}");
+        assert!(info.contains("gpt-5.5"), "wire model: {info:?}");
+        assert!(!info.contains("MixinSession"), "router name hidden: {info:?}");
+        // The branch value renders.
+        assert!(info.contains("feat/tui-v4"), "branch value: {info:?}");
+    }
+
+    /// S4 width-gating (task-4 priority: the ctx BAR is the headline, dropped LAST).
+    /// On a terminal too narrow for the full row, the TRAILING fields (`mouse:` then
+    /// `branch:`) drop FIRST so the bar survives; only below the bar-core width does
+    /// the bar itself drop. 112-wide fits the bar-core (~98) but not the full row
+    /// (~136) → bar KEPT, `mouse:`/`branch:` gone. 88-wide can't fit the bar-core →
+    /// the bar finally drops but the labels + `Nk/Mk (P%)` readout stay legible.
+    #[test]
+    fn session_info_width_gate_keeps_bar_drops_trailing_first() {
+        let mut app = AppState::new();
+        app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
+        app.git_branch = Some("feat/tui-v4".into());
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Ready {
+                version: None,
+                model: Some("MixinSession/codex-pro".into()),
+                llm: Some("codex-pro".into()),
+                model_real: Some("gpt-5.5".into()),
+            }),
+            0,
+        );
+        app.apply_bridge_event(
+            BridgeEvent::Frame(CoreToUi::Status {
+                model: None,
+                llm: None,
+                model_real: None,
+                context_percent: Some(48.0),
+                context_used: Some(96_000),
+                context_limit: Some(200_000),
+                tokens: Some(100),
+                input_tokens: Some(60),
+                output_tokens: Some(40),
+                cache_tokens: None,
+                last_input: Some(60),
+                last_output: Some(40),
+                text: None,
+            }),
+            0,
+        );
+        // 112: the bar-core (~98) fits, the full row (~136) does not → bar KEPT,
+        // trailing fields dropped to make room.
+        let rows = cockpit_rows(&mut app, 112, 30);
+        let info = rows
+            .iter()
+            .find(|r| r.contains("Channel:"))
+            .expect("the labeled session-info row");
+        assert!(info.contains('█'), "the headline bar is KEPT on a mid-width term: {info:?}");
+        assert!(info.contains('░'), "bar track kept: {info:?}");
+        assert!(info.contains("96k/200k (48%)"), "ctx readout kept: {info:?}");
+        assert!(info.contains("Channel:") && info.contains("ctx:"), "labels kept: {info:?}");
+        // The trailing, least-important fields are shed FIRST to make room for the bar.
+        assert!(!info.contains("mouse:"), "mouse field dropped first: {info:?}");
+        assert!(!info.contains("branch:"), "branch field dropped before the bar: {info:?}");
+
+        // 88: too narrow even for the bar-core (~98) → the bar finally drops (last
+        // resort), but the identity labels + the readout (~80) still survive.
+        let rows_narrow = cockpit_rows(&mut app, 88, 30);
+        let info_n = rows_narrow
+            .iter()
+            .find(|r| r.contains("Channel:"))
+            .expect("the labeled session-info row (narrow)");
+        assert!(!info_n.contains('█'), "bar dropped as last resort on a very narrow term: {info_n:?}");
+        assert!(!info_n.contains('['), "bar bracket gone when bar dropped: {info_n:?}");
+        assert!(info_n.contains("Channel:"), "Channel label kept even narrow: {info_n:?}");
+        assert!(info_n.contains("96k/200k (48%)"), "ctx readout kept even narrow: {info_n:?}");
+    }
+
+    /// S4: with NO context data the ctx field falls back to the `[░░░░…] —` stub
+    /// (an all-empty bar + an em-dash readout), never a panic or a stray percent.
+    #[test]
+    fn session_info_ctx_absent_shows_dash() {
+        let mut app = AppState::new();
+        app.conn = crate::app::ConnStatus::Connected { model: Some("m".into()) };
+        app.model = Some("m".into());
+        // No Status frame → context_percent / used / limit all None.
+        assert!(app.context_percent.is_none());
+        assert!(app.context_used.is_none() && app.context_limit.is_none());
+        let rows = cockpit_rows(&mut app, 150, 30);
+        let info = rows
+            .iter()
+            .find(|r| r.contains("ctx:"))
+            .expect("the labeled ctx field renders even with no data");
+        assert!(info.contains('░'), "the absent bar is all-empty track: {info:?}");
+        assert!(!info.contains('█'), "no fill when ctx is unknown: {info:?}");
+        assert!(info.contains("—"), "the readout is a bare em-dash: {info:?}");
+        assert!(!info.contains('%'), "no percent when ctx is unknown: {info:?}");
     }
 
     /// Slice 5 layout INVERSION (was `below_composer_has_two_rows`): the `└ Tip`
@@ -474,7 +734,14 @@ mod tests {
             .rposition(|r| r.starts_with('╰'))
             .expect("the composer has a bottom border");
         assert!(spinner_idx + 1 < bottom, "the `└` tip sits above the composer");
-        assert_eq!(bottom + 2, rows.len(), "exactly ONE row follows the composer while busy");
+        // Below the composer: exactly ONE non-blank row (session info), then the
+        // hug-top blank spacer fills the screen bottom (R6 S1 — the composer now hugs
+        // the content at the TOP instead of being pinned at `rows.len()`).
+        assert!(!rows[bottom + 1].trim().is_empty(), "the session-info row follows the composer");
+        assert!(
+            rows[bottom + 2..].iter().all(|r| r.trim().is_empty()),
+            "only the blank hug-top spacer follows the session-info row while busy"
+        );
         // The sole below-composer row is the session info, NOT a second `└` tip.
         assert!(!rows[bottom + 1].starts_with("└ "), "no detached below-composer tip while busy");
         assert!(
@@ -491,8 +758,13 @@ mod tests {
             .iter()
             .rposition(|r| r.starts_with('╰'))
             .expect("the composer has a bottom border");
-        assert_eq!(idle_bottom + 3, idle_rows.len(), "two rows follow the composer when idle");
+        // Idle: session-info (row1) then the `└` tip (row2) follow the composer, then
+        // the hug-top blank spacer (R6 S1 — no longer pinned at `idle_rows.len()`).
         assert!(idle_rows[idle_bottom + 2].starts_with("└ "), "row2 is the `└ ` tip when idle");
+        assert!(
+            idle_rows[idle_bottom + 3..].iter().all(|r| r.trim().is_empty()),
+            "only the blank hug-top spacer follows the idle row2 tip"
+        );
     }
 
     /// Slice 5 HONEST CHECK: the busy spinner status row matches CC's
@@ -516,6 +788,8 @@ mod tests {
                 model: None,
                 llm: None, model_real: None,
                 context_percent: Some(48.0),
+                context_used: None,
+                context_limit: None,
                 tokens: Some(1574),
                 input_tokens: Some(1234),
                 output_tokens: Some(340),
@@ -566,6 +840,8 @@ mod tests {
                 model: None,
                 llm: None, model_real: None,
                 context_percent: Some(48.0),
+                context_used: None,
+                context_limit: None,
                 tokens: Some(1574),
                 input_tokens: Some(1234),
                 output_tokens: Some(340),
@@ -596,7 +872,10 @@ mod tests {
         app.apply_bridge_event(BridgeEvent::ChildExited { code: Some(1) }, 0);
         assert!(matches!(app.conn, crate::app::ConnStatus::Disconnected { .. }));
 
-        let (w, h) = (100u16, 30u16);
+        // 160-wide so the labeled row + the ctx bar + the disconnect chip on the tail
+        // all fit (the S4 labeled fields are longer than the old ` · ` row, so a
+        // narrow 100-wide frame would clip the tail chip — N1 needs it VISIBLE).
+        let (w, h) = (160u16, 30u16);
         let rows = cockpit_rows(&mut app, w, h);
         // Row1 (just above the `└` tip row, i.e. the last-but-one row) carries the
         // disconnect chip — the reason text from the child exit is shown (N1).

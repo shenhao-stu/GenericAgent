@@ -124,11 +124,42 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     // pin a 1-row breadcrumb of the last user prompt at the TOP of the transcript.
     let show_sticky = !app.following() && app.last_user_source_first_line().is_some();
 
-    // §5 vertical split. Transcript = Min(0) so it flexes to fill. The `└ Tip`
-    // travels with the spinner state (Slice 5): while BUSY it sits as a
-    // corner-continuation row right under the spinner status line (above the
-    // composer), and the sole below-composer row is row1 session info. While IDLE
-    // it returns to its row2 below-composer slot. Row1 always carries the conn chip.
+    // §5 vertical split. The `└ Tip` travels with the spinner state (Slice 5): while
+    // BUSY it sits as a corner-continuation row right under the spinner status line
+    // (above the composer), and the sole below-composer row is row1 session info.
+    // While IDLE it returns to its row2 below-composer slot. Row1 always carries the
+    // conn chip.
+    //
+    // SLICE S1 — HUG THE TOP. Every chunk EXCEPT the transcript is a fixed height, so
+    // the transcript's available height is `area.height` minus their sum. When the
+    // content FITS that height we pin the transcript to exactly its content
+    // (`Length(total_visual_lines)`) and append a trailing `Min(0)` SPACER that soaks
+    // up the leftover blank at the very BOTTOM of the screen — so content + spinner +
+    // composer + footer all hug the TOP (the Claude-Code "grow from top" look). When
+    // the content OVERFLOWS, the transcript stays `Min(0)` (fills the region, scrolls
+    // internally) and NO spacer is appended (composer pinned at the bottom, as before).
+    let fixed_rows: u16 = HEADER_ROWS // header (multi-row rounded box, Slice 2)
+        + 1 // rainbow separator
+        + if show_sticky { 1 } else { 0 } // sticky last-user breadcrumb (R6 Part A)
+        + if show_spinner { 2 } else if show_done { 1 } else { 0 } // spinner+tip XOR done
+        + if dropdown_rows > 0 { dropdown_rows } else { 0 } // palette / file picker
+        + composer_rows // composer (bordered)
+        + 1 // row1: runtime session info
+        + if !show_spinner { 1 } else { 0 }; // row2: └ Tips (idle only)
+    let avail_transcript_h = area.height.saturating_sub(fixed_rows);
+    // Read the wrap cache's total ONCE here — `prepare_frame` syncs the cache to
+    // `area.width` (== the transcript's full-width column) BEFORE calling this, and
+    // render draws AFTER `prepare_frame` with no intervening cache mutation, so BOTH
+    // `split_cockpit` calls observe the SAME `total_visual_lines()` → identical layout
+    // (the geometry contract). A `total == avail` transcript still FITS, so it hugs the
+    // top with a zero-height spacer (Min(0) → 0 rows); only `total > avail` overflows.
+    let total_visual_lines = app.wrap_cache.total_visual_lines();
+    // Hug-top only with actual content that fits. An EMPTY transcript keeps the
+    // flexing `Min(0)` region so the "Type a message…" hint still has somewhere to
+    // render (a `Length(0)` transcript would hide it); there is nothing to hug anyway.
+    let hug_top =
+        total_visual_lines >= 1 && total_visual_lines <= avail_transcript_h as usize;
+
     let mut constraints: Vec<Constraint> = vec![
         Constraint::Length(HEADER_ROWS), // header (multi-row rounded box, Slice 2)
         Constraint::Length(1),           // rainbow separator
@@ -136,7 +167,13 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     if show_sticky {
         constraints.push(Constraint::Length(1)); // sticky last-user breadcrumb (R6 Part A)
     }
-    constraints.push(Constraint::Min(0)); // transcript (FLEX, shrinks for the taller header)
+    if hug_top {
+        // Pin the transcript to its content height; the trailing spacer (below)
+        // absorbs the blank at the bottom.
+        constraints.push(Constraint::Length(total_visual_lines as u16));
+    } else {
+        constraints.push(Constraint::Min(0)); // transcript (FLEX, fills + scrolls)
+    }
     if show_spinner {
         constraints.push(Constraint::Length(1)); // spinner status line
         constraints.push(Constraint::Length(1)); // └ tip (under the spinner)
@@ -151,13 +188,19 @@ pub(crate) fn split_cockpit(app: &AppState, area: Rect) -> CockpitLayout {
     if !show_spinner {
         constraints.push(Constraint::Length(1)); // row2: └ Tips (idle only)
     }
+    if hug_top {
+        // The hug-top SPACER — pure padding at the very bottom (below info/tips). It is
+        // indexed LAST and never returned in `CockpitLayout`: nothing draws into it.
+        constraints.push(Constraint::Min(0));
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    // Index the chunks in order.
+    // Index the chunks in order. The trailing hug-top spacer (when present) is the
+    // LAST chunk and is intentionally never consumed by `next()` (pure padding).
     let mut i = 0;
     let mut next = || {
         let c = chunks[i];

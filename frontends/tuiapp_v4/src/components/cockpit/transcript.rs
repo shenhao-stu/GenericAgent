@@ -104,27 +104,16 @@ pub(crate) fn render_transcript(frame: &mut Frame, area: Rect, app: &AppState, t
         }
     }
 
-    // SLICE S2 — bottom-anchor: when following AND total visual lines < area height,
-    // render into a sub-rect that starts below the blank gap so the last content row
-    // sits flush against the spinner/footer.  In scroll-up (anchored) mode the window
-    // already fills a full screenful, so no offset is needed.  The DRAW rect shrinks
-    // but prepare_frame/split_cockpit/sync geometry use the full `area` unchanged.
-    let render_area = {
-        let total = app.wrap_cache.total_visual_lines();
-        let h = area.height as usize;
-        if app.following() && total < h {
-            let gap = (h - total) as u16;
-            Rect {
-                y: area.y + gap,
-                height: area.height.saturating_sub(gap),
-                ..area
-            }
-        } else {
-            area
-        }
-    };
-
-    frame.render_widget(Paragraph::new(lines), render_area);
+    // SLICE S1 — HUG THE TOP: the transcript is rendered top-aligned into the given
+    // `area` (a `Paragraph` draws top-down). When the content is SHORTER than the
+    // viewport, `split_cockpit` has already sized this `area` to exactly
+    // `total_visual_lines` rows and parked the blank in a trailing spacer at the very
+    // bottom of the screen — so content + spinner + composer + footer all hug the top
+    // (the Claude-Code "grow from top" look). When the content OVERFLOWS, `area` is the
+    // full flex region and the viewport scrolls internally, exactly as before. The
+    // round-5 bottom-anchor sub-rect (which pushed content DOWN behind a blank gap) is
+    // gone — geometry now lives wholly in `split_cockpit` (one source of truth, P1).
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Build one full-width USER band row (Q1): the row `text` (one soft-wrapped
@@ -269,20 +258,29 @@ mod tests {
         }
     }
 
-    /// SLICE S2 HONEST-CHECK — blank_gap_bottom_anchor_live_path.
+    /// SLICE S1 HONEST-CHECK — content_hugs_top_blank_at_bottom.
     ///
-    /// Builds a styled TestBackend frame at 80×40 with a transcript shorter than the
-    /// viewport (a few assistant turns + user message + 2 notices = ~12 visual lines in
-    /// a 25-row transcript rect).  After the fix the spinner must immediately follow the
-    /// last content row (gap == 0).  FAILS before the fix (gap ≈ 13).  PASSES after.
+    /// Builds a styled TestBackend frame at 80×40 with a transcript SHORTER than its
+    /// available height (a short assistant turn + user message + 2 notices). After the
+    /// hug-top fix:
+    ///   * the FIRST non-blank content row sits at the TOP of the transcript region
+    ///     (NOT pushed down behind a blank gap),
+    ///   * the just-above-composer status row (the frozen done-line `⠿ … for 0s`)
+    ///     IMMEDIATELY follows the last content row (gap == 0),
+    ///   * the blank is absorbed at the screen BOTTOM — the rows below the tips row are
+    ///     blank.
+    /// FAILS before the fix (round-5 bottom-anchor pushed content DOWN, leaving the
+    /// blank gap ABOVE content: the first content row was far below `transcript.y` and
+    /// the bottom rows were NOT blank). PASSES after.
     ///
     /// Also asserts the tool box ╰─╯ bottom border is present (the "visually not
-    /// closing" appearance is caused by the large blank gap making the box look far
-    /// from subsequent content — an optical illusion, not a missing border).
+    /// closing" appearance was an optical illusion from the old blank gap, not a
+    /// missing border).
     #[test]
-    fn blank_gap_bottom_anchor_live_path() {
+    fn content_hugs_top_blank_at_bottom() {
         use crate::app::{AppState, ConnStatus};
         use crate::bridge::{BridgeEvent, CoreToUi};
+        use crate::components::cockpit::split_cockpit;
         use crate::components::render;
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -293,13 +291,12 @@ mod tests {
         let mut app = AppState::new();
         app.conn = ConnStatus::Connected { model: Some("gpt-5".into()) };
 
-        // Short transcript: a few assistant turns + user + 2 notices.
+        // Short transcript: a brief assistant turn (with a tool box) + user + 2 notices.
         let ev = BridgeEvent::Frame(CoreToUi::MessageBegin {
             mid: "m1".into(),
             role: "assistant".into(),
         });
         app.apply_bridge_event(ev, 0);
-        // Simplified text that will produce a modest number of visual lines.
         let text = "Let me check something.\n\u{1F6E0}\u{FE0F} code_run({\"script\": \"cargo build\"})\n[Info] build succeeded\nDone.";
         let ev2 = BridgeEvent::Frame(CoreToUi::MessageDelta {
             mid: "m1".into(),
@@ -316,43 +313,86 @@ mod tests {
         app.push_notice("样式已更新".into());
 
         // Render via the LIVE path: prepare_frame then draw.
-        app.prepare_frame(ratatui::layout::Rect::new(0, 0, w, h), &theme);
+        let area = ratatui::layout::Rect::new(0, 0, w, h);
+        app.prepare_frame(area, &theme);
+        // The transcript region (top + height) from the SAME split render draws into —
+        // and a precondition that the content actually fits (hug-top is engaged).
+        let layout = split_cockpit(&app, area);
+        let tx_top = layout.transcript.y as usize;
+        assert!(
+            app.wrap_cache.total_visual_lines() <= layout.transcript.height as usize,
+            "precondition: the short transcript fits its region (hug-top engaged): \
+             total={} region_h={}",
+            app.wrap_cache.total_visual_lines(),
+            layout.transcript.height
+        );
         term.draw(|f| render(f, &app, &theme, 0)).unwrap();
         let buf = term.backend().buffer();
 
-        // Scan all rows — classify as spinner, content, or blank.
-        let mut spinner_row: Option<usize> = None;
-        let mut last_content_row: Option<usize> = None;
-        for y in 0..h as usize {
-            let row: String = (0..w as usize)
+        let row_text = |y: usize| -> String {
+            (0..w as usize)
                 .map(|x| buf.content()[y * w as usize + x].symbol().chars().next().unwrap_or(' '))
-                .collect();
-            if row.contains('⠿') || row.contains("Pondering") || row.contains("for 0s") {
-                spinner_row = Some(y);
+                .collect()
+        };
+
+        // (1) The frozen done-line (`⠿ … for 0s`) row + the last content row above it.
+        // (idle after a turn → the done-line takes the just-above-composer slot.)
+        let mut done_row: Option<usize> = None;
+        let mut last_content_row: Option<usize> = None;
+        let mut first_content_row: Option<usize> = None;
+        for y in 0..h as usize {
+            let row = row_text(y);
+            if row.contains('⠿') || row.contains("for 0s") {
+                done_row = Some(y);
             } else if !row.trim().is_empty() {
                 last_content_row = Some(y);
+                if first_content_row.is_none() {
+                    first_content_row = Some(y);
+                }
             }
         }
+        let done_y = done_row.expect("the frozen done-line row must be rendered");
+        let last_y = last_content_row.expect("at least one content row must be rendered");
 
-        // The spinner row and a last-content row must both be present.
-        let spin_y = spinner_row.expect("spinner row must be rendered");
-        let content_y = last_content_row.expect("at least one content row must be rendered");
-
-        // AFTER the fix: the spinner immediately follows the last content row.
-        // BEFORE the fix: there are 10+ blank rows between content and spinner.
-        let gap = spin_y.saturating_sub(content_y + 1);
+        // (1a) HUG TOP: the FIRST non-blank content row is the header — but the first
+        // content row INSIDE the transcript region sits at its very top (not pushed
+        // down). Find the first non-blank row at/below the transcript top.
+        let first_tx_content = (tx_top..h as usize)
+            .find(|&y| !row_text(y).trim().is_empty())
+            .expect("the transcript region must contain content");
         assert_eq!(
-            gap,
-            0,
-            "blank rows between last content (row {content_y}) and spinner (row {spin_y}): \
-             {gap} blank rows — bottom-anchor fix must eliminate the gap"
+            first_tx_content, tx_top,
+            "content must HUG the top of the transcript region (row {tx_top}), \
+             but the first non-blank transcript row is {first_tx_content} \
+             (before the fix it was pushed down behind a blank gap)"
+        );
+
+        // (2) The done-line IMMEDIATELY follows the last content row (gap == 0). Before
+        // the fix the content was bottom-anchored with the blank gap ABOVE it, so the
+        // last content row still abutted the done-line — but (1a)+(3) pin the gap to the
+        // bottom; together they fail the old layout. Keep gap==0 as the contiguity check.
+        let gap = done_y.saturating_sub(last_y + 1);
+        assert_eq!(
+            gap, 0,
+            "the done-line (row {done_y}) must immediately follow the last content row \
+             (row {last_y}); {gap} blank rows between them"
+        );
+
+        // (3) BLANK ABSORBED AT THE BOTTOM: the final rows of the buffer (below the
+        // tips row) are blank. Before the fix the block was bottom-anchored, so the
+        // bottom rows were FULL (composer/info/tips) with the blank gap up top — this
+        // asserts the inversion. The last 2 rows are info+tips (non-blank); the very
+        // last row of the screen must be blank padding (the hug-top spacer).
+        assert!(
+            row_text(h as usize - 1).trim().is_empty(),
+            "the very bottom row must be blank padding (the hug-top spacer absorbs the \
+             gap at the bottom):\n{:?}",
+            row_text(h as usize - 1)
         );
 
         // The tool box ╰─╯ bottom border must be visible (not cut off by viewport).
         let has_bottom_border = (0..h as usize).any(|y| {
-            let row: String = (0..w as usize)
-                .map(|x| buf.content()[y * w as usize + x].symbol().chars().next().unwrap_or(' '))
-                .collect();
+            let row = row_text(y);
             row.contains('╰') && row.contains('╯')
         });
         assert!(
