@@ -12,6 +12,7 @@ try:
     from plugins.hooks import discover_and_load; discover_and_load()
 except Exception: pass
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
+import commit_signature
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 def load_tool_schema(suffix=''):
@@ -39,8 +40,7 @@ if not os.path.exists(cdp_cfg):
 def get_system_prompt():
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f: prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
-    sig = os.environ.get('GA_COMMIT_SIGNATURE', '').strip()
-    if sig: prompt += f"When you create a git commit, append `{sig}` as the final line of the commit message.\n"
+    prompt += commit_signature.prompt_block()
     prompt += get_global_memory()
     return prompt
 
@@ -131,6 +131,9 @@ class GenericAgent:
             return None
         if raw_query.strip() == '/resume':
             return r'帮我看看最近有哪些会话可以恢复。读model_responses/目录，按修改时间取最近10个文件，从每个文件里找最后一个<history>...</history>块，用一句话总结每个会话在聊什么，列表给我选。注意读文件后要把字面的\n替换成真换行才能正确匹配。'
+        if m := re.match(r'/signature\b(.*)', raw_query.strip(), re.S):
+            display_queue.put({'done': '✅ ' + commit_signature.toggle(m.group(1)), 'source': 'system'})
+            return None
         return raw_query
 
     def run(self):

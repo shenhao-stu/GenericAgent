@@ -1537,6 +1537,9 @@ async function handleSlash(cmd) {
         }
       }
       break;
+    case 'signature':
+      await sendPrompt('/signature' + (arg ? ' ' + arg : ''));
+      break;
     default:
       showSystem(`Unknown command: /${name}. Try /help.`);
   }

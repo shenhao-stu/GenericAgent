@@ -4689,6 +4689,9 @@ class SB:
                 self._submit(prompt, [])
             else:
                 self.commit([f'❌ unknown command /{name}'])
+        elif name == 'signature':
+            import commit_signature
+            self.commit(['✅ ' + commit_signature.toggle(arg or '')])
         elif name == 'scheduler':
             from frontends import slash_cmds
             parts = (arg or '').split(None, 1)

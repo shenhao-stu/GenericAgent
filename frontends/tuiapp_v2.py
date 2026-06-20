@@ -3864,6 +3864,7 @@ class GenericAgentTUI(App[None]):
             "update": self._cmd_slash_inject, "autorun": self._cmd_slash_inject,
             "morphling": self._cmd_slash_inject, "goal": self._cmd_slash_inject,
             "hive": self._cmd_slash_inject, "conductor": self._cmd_slash_inject,
+            "signature": self._cmd_signature,
             "scheduler": self._cmd_scheduler,
             "quit": self._cmd_quit, "exit": self._cmd_quit,
         }
@@ -6244,6 +6245,10 @@ class GenericAgentTUI(App[None]):
         # Keep the user's original `/cmd ...` as the visible bubble so the
         # transcript stays self-explanatory; the agent sees the long prompt.
         self.submit_user_message(prompt, display_text=text or head)
+
+    def _cmd_signature(self, args, raw):
+        import commit_signature
+        self._system('✅ ' + commit_signature.toggle(' '.join(args)))
 
     def _cmd_scheduler(self, args, raw):
         """`/scheduler` lists reflect/*.py + sche_tasks/*.json and starts the
