@@ -1,14 +1,15 @@
-"""Opt-in commit signature: set GA_COMMIT_SIGNATURE (or use /signature) to append a trailer to commits."""
+"""Commit signature: GA_COMMIT_SIGNATURE=true/false (or /signature on|off) toggles a fixed Co-Authored-By trailer."""
 import os
 
-_sig = os.environ.get('GA_COMMIT_SIGNATURE', '').strip()
+_SIGNATURE = "Co-Authored-By: GenericAgent <bot@gaagent.ai>"
+_on = os.environ.get('GA_COMMIT_SIGNATURE', 'false').strip().lower() in ('1', 'true', 'on', 'yes')
 
 def prompt_block():
-    return f"When you create a git commit, append `{_sig}` as the final line of the commit message.\n" if _sig else ''
+    return f"When you create a git commit, append `{_SIGNATURE}` as the final line of the commit message.\n" if _on else ''
 
 def toggle(arg=''):
-    global _sig
-    a = (arg or '').strip()
-    if a.lower() in ('', 'status'): return f"commit signature: {_sig or 'off'}"
-    _sig = '' if a.lower() == 'off' else (os.environ.get('GA_COMMIT_SIGNATURE', '').strip() if a.lower() == 'on' else a)
-    return f"commit signature: {_sig or 'off'}"
+    global _on
+    a = (arg or '').strip().lower()
+    if a == 'on': _on = True
+    elif a == 'off': _on = False
+    return f"commit signature: {'on' if _on else 'off'}"
