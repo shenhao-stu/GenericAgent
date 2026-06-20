@@ -39,6 +39,8 @@ if not os.path.exists(cdp_cfg):
 def get_system_prompt():
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f: prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
+    sig = os.environ.get('GA_COMMIT_SIGNATURE', '').strip()
+    if sig: prompt += f"When you create a git commit, append `{sig}` as the final line of the commit message.\n"
     prompt += get_global_memory()
     return prompt
 
