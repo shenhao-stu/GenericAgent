@@ -82,8 +82,7 @@ def _sanitize_leading_user_msg(msg):
         if not isinstance(block, dict): continue
         if block.get('type') == 'tool_result':
             c = block.get('content', '')
-            if isinstance(c, list):  # content 本身也可能是 list[{type:text,text:...}]
-                texts.extend(b.get('text', '') for b in c if isinstance(b, dict))
+            if isinstance(c, list): texts.extend(b.get('text', '') for b in c if isinstance(b, dict))
             else: texts.append(str(c))
         elif block.get('type') == 'text': texts.append(block.get('text', ''))
     msg['content'] = [{"type": "text", "text": '\n'.join(t for t in texts if t)}]
@@ -98,17 +97,27 @@ print = safeprint
 def trim_messages_history(history, sess):
     cap = sess.context_win * 3
     target = int(cap * getattr(sess, 'trim_keep_rate', 0.6))
-    def cost(): return sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
+    kp = sess.trim_keep_prefix
+    def cost(ms): return sum(len(json.dumps(m, ensure_ascii=False)) for m in ms)
     compress_history_tags(history, interval=getattr(sess, 'cut_msg_interval', 5))
-    print(f'[Debug] Current context: {cost()} chars, {len(history)} messages.')
-    if cost() <= cap: return
+    print(f'[Debug] Current context: {cost(history)} chars, {len(history)} messages.')
+    if cost(history) <= cap: return
     compress_history_tags(history, keep_recent=4, force=True)
-    if cost() <= target: return
-    while len(history) > 9 and cost() > target:
-        history.pop(0)
-        while history and history[0].get('role') != 'user': history.pop(0)
-        if history and history[0].get('role') == 'user': history[0] = _sanitize_leading_user_msg(history[0])
-    print(f'[Debug] Trimmed context, current: {cost()} chars, {len(history)} messages.')
+    if cost(history) <= target: return
+    pre, post = history[:kp], history[kp:]
+    while len(post) > 9 and cost(pre) + cost(post) > target:
+        post.pop(0)
+        while post and post[0].get('role') != 'user': post.pop(0)
+        if post and post[0].get('role') == 'user': post[0] = _sanitize_leading_user_msg(post[0])
+    if kp and pre:
+        m = pre[-1]
+        if m.get('role') == 'assistant' and isinstance(m.get('content'), list):
+            m['content'] = [b for b in m['content'] if not (isinstance(b, dict) and b.get('type') == 'tool_use')] or [{"type": "text", "text": "..."}]
+        _d = lambda: [{"type": "text", "text": "..."}]
+        gap = [{"role": "assistant", "content": _d()}] if m.get('role') == 'user' else [{"role": "user", "content": _d()}, {"role": "assistant", "content": _d()}]
+        history[:] = pre + gap + post
+    else: history[:] = pre + post
+    print(f'[Debug] Trimmed context, current: {cost(history)} chars, {len(history)} messages.')
 
 def auto_make_url(base, path):
     b, p = base.rstrip('/'), path.strip('/')
@@ -539,6 +548,7 @@ class BaseSession:
         self.context_win = cfg.get('context_win', default_context_win)
         self.maxlen_multiplier = min(max(self.context_win / default_context_win * 0.85, 1.0), 3.0)
         self.cut_msg_interval = int(default_cut_msg_interval * self.maxlen_multiplier)
+        self.trim_keep_prefix = max(0, int(cfg.get('trim_keep_prefix', 0) or 0))
         self.history = []; self.lock = threading.Lock(); self.system = ""
         self.name = cfg.get('name', self.model)
         self.extra_sys_prompt = cfg.get('extra_sys_prompt', '')
