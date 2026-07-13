@@ -148,11 +148,22 @@ def build_update_prompt(args_text: str = "") -> str:
     do a user-friendly preflight (upstream commits + diff) before pulling.
     Language follows `_current_lang()` so a /language switch in tui_v3 (or a
     `GA_LANG=...` shell override) automatically flips this prompt too.
+
+    The prompt pins every git command to the repo root (`_ROOT`).  The agent's
+    default cwd is the `temp/` subdirectory, where a `-- <file>` pathspec is
+    resolved relative to cwd — so `git checkout upstream/main -- <file>`, fed the
+    root-relative paths that `git diff --name-only` prints, dies with "pathspec
+    did not match" (the "/update keeps looking in the wrong directory" bug).
+    Handing the agent the absolute root closes that gap.
     """
+    root = str(_ROOT)
     if _current_lang() == "en":
         return (
             "Update this GenericAgent checkout from the official upstream "
             "https://github.com/Lsdefine/GenericAgent .\n"
+            f"Run every git command from the repo root `{root}` (cd there first, or use "
+            f"`git -C \"{root}\"`): your cwd is a subdirectory, where `-- <file>` pathspecs "
+            "fail to match the root-relative paths `git diff --name-only` prints.\n"
             "1. `git fetch upstream`; note the current branch and any local commits ahead.\n"
             "2. Preview: upstream commits not yet local (short hash + subject + date) "
             "plus a changed-files summary.\n"
@@ -180,6 +191,9 @@ def build_update_prompt(args_text: str = "") -> str:
         )
     return (
         "请更新当前 GenericAgent 仓库，官方上游为 https://github.com/Lsdefine/GenericAgent 。\n"
+        f"所有 git 命令一律在仓库根目录 `{root}` 下执行（先 cd 过去，或用 `git -C \"{root}\"`）："
+        "你的 cwd 是子目录，`-- <file>` 按 cwd 解析，匹配不上 `git diff --name-only` "
+        "输出的根相对路径。\n"
         "1. `git fetch upstream`；确认当前分支及是否有领先上游的本地 commit。\n"
         "2. 预览：本地尚未包含的上游提交（短 hash + 标题 + 日期）及变更文件摘要。\n"
         "3. 对齐提交历史，上游优先：有本地 commit 则 `git merge upstream/main`（冲突取上游）；"
