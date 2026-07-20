@@ -443,7 +443,7 @@ class GenericAgentHandler(BaseHandler):
             next_prompt += "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取sop中的关键点（特别是靠后的）update working memory."
         return StepOutcome(result, next_prompt=next_prompt)
     
-    def export_history(self, fn): 
+    def export_history(self, fn):
         with open(fn, 'w', encoding='utf-8') as f: json.dump(self.parent.llmclient.backend.history, f, ensure_ascii=False)
     def enter_project_mode(self, name): self.parent._ga_project_mode_name = name
     def _in_plan_mode(self): return self.working.get('in_plan_mode')

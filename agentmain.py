@@ -242,7 +242,7 @@ if __name__ == '__main__':
         histfile = histfile or os.path.join(d, '_history.json')
     elif args.func:
         infile = args.func; outfile = os.path.splitext(args.func)[0] + '.out.txt'
-    
+
     if histfile and os.path.isfile(histfile): agent.llmclient.backend.history = json.loads(open(histfile, encoding='utf-8').read())
 
     if args.func or args.task:
@@ -250,8 +250,8 @@ if __name__ == '__main__':
         with open(infile, encoding='utf-8') as f: raw = f.read()
         while True:
             dq = agent.put_task(raw, source='func' if args.func else 'task')
-            while 'done' not in (item := dq.get(timeout=2200)): 
-                if 'next' in item: 
+            while 'done' not in (item := dq.get(timeout=2200)):
+                if 'next' in item:
                     with open(outfile, 'w', encoding='utf-8') as f: f.write(item.get('next', ''))
             with open(outfile, 'w', encoding='utf-8') as f: f.write(item['done'] + '\n\n[ROUND END]\n')
             if not args.task: break
