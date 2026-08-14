@@ -1,12 +1,12 @@
 """GA Hub: `import hub` -> client (silent if no server); `python hub.py` -> WS server.
     hub.connect(agent, 'stapp')     # or override any hook: connect(a, n, put_task=, get_outputs=, abort=)
-    default put -> 'busy' if agent.is_running, else parks {'text','q'} in agent._hub_inbox for the UI
+    default put -> 'busy' if agent.is_running, else parks plain text in agent._hub_inbox for the UI
 HTTP (errors = {'error','code'} + status: offline/gone 404, busy 409, timeout 504, nosupport 501, badop 400):
     GET peers -> [{name,title,n_msgs,sig}] | {name}/messages?detail=1&sig= -> {title,tasks:[{i,input,steps:
     [{j,title,n}]}],sig} or {same:1,sig} | {name}/seg/{i}/{j}?off=N -> {content,off,n} (step bodies, tailable)
     POST {name}/put {"text":..} -> {ok:1} | {name}/abort -> {ok:1}
 """
-import os, re, sys, json, time, asyncio, threading, random, hmac
+import os, re, sys, json, time, asyncio, threading, random, hmac, hashlib
 PORT = int(os.environ.get('GA_HUB_PORT', 19736))
 WEB_PORT = int(os.environ.get('GA_HUB_WEB_PORT', PORT + 1))   # the only face fit to be tunnelled out (frp this one)
 TOKEN = os.environ.get('GA_HUB_TOKEN') or ''.join(random.choices('abcdefghijkmnpqrstuvwxyz23456789', k=6))
@@ -57,10 +57,12 @@ class HubClient:
         w = sum(2 if ord(ch) > 0x2E80 else 1 for ch in title)   # display width: a CJK char is worth two
         if len(ins) > 1 and w < TITLE_MIN: title = ins[-2].split('\n')[0] + ' <- ' + title
         det, rows = int(c.get('detail', 1)), []
+        since = max(0, int(c.get('since') or 0))   # delta: the client already holds rows < since (they are immutable)
         for i, (t, o) in enumerate(zip(tasks, outs)):
+            if i < since: continue
             steps = [{'j': j, 'title': self._stitle(i, j, s), 'n': len(s or '')} for j, s in enumerate(o)]
             rows.append({'i': i, 'input': t.get('input', ''), **({'steps': steps} if det else {'ns': len(o)})})
-        return {'title': title[:80], 'tasks': rows, 'sig': sig, **self.state()}
+        return {'title': title[:80], 'tasks': rows, 'nt': len(tasks), 'sig': sig, **self.state()}   # nt lets a delta client spot /clear
     def _seg(self, c):
         tasks, off = list(self.get_outputs() or []), max(0, int(c.get('off') or 0))
         i, j = int(c.get('i', -1)), int(c.get('j', -1))
@@ -92,11 +94,12 @@ def serve():
 def connect(agent, name=None, put_task=None, get_outputs=None, abort=None, fold=None):
     """One line to wire a GA host: `hub.connect(agent, 'stapp')`; any hook can still be overridden.
     Default put refuses while the agent is busy (a remote must not cut in line), else it parks
-    (text, queue) in agent._hub_inbox so a UI can pop it and echo the task as its own bubble.
+    plain text in agent._hub_inbox; the UI feeds it through its own input entrance when idle,
+    so remote tasks behave exactly like typed ones (bubble/stream/stop). Requires a live UI tab.
     Never raises: a broken hub must not break its host."""
     def _put(text):
         if getattr(agent, 'is_running', False): return {'error': f'peer {name} is busy', 'code': 'busy'}
-        agent._hub_inbox.append({'text': text, 'q': agent.put_task(text, source='hub')})
+        agent._hub_inbox.append(text)   # no put_task here: the UI's unified entrance sends it
     try:
         try: serve()                                   # best effort: bring up a local hub if none is listening
         except Exception: pass
@@ -117,6 +120,8 @@ if __name__ == '__main__':
     @app.middleware('http')
     async def guard(req: Request, call_next):
         if req.scope['server'][1] == PORT: return Response(status_code=404)   # bus port speaks WebSocket only
+        public = getattr(app.state, 'p2p_pair_open', False) and req.url.path in ('/pair', '/pair/status')
+        if public: return await call_next(req)
         t = req.query_params.get('t') or req.cookies.get('ga_hub_t') or ''    # web port: token or nothing
         if not hmac.compare_digest(t, TOKEN): return Response(status_code=403)
         r = await call_next(req); r.set_cookie('ga_hub_t', TOKEN, httponly=True, samesite='lax'); return r
@@ -157,7 +162,7 @@ if __name__ == '__main__':
             if name and peers.get(name) is ws:      # never evict the successor that replaced us
                 peers.pop(name, None); meta.pop(name, None); print(f'[-] {name} ({len(peers)} online)')
     @app.get('/api/peers')
-    async def api_peers():      # one cheap round-trip per peer: counts only, and only if its sig moved
+    async def api_peers(psig: str = None):   # psig given -> {same:1} while the row set holds (no psig = full list)
         now = time.time()
         names = [n for n in peers if 'get' in (meta.get(n, {}).get('caps') or []) and now >= pdead.get(n, 0)]
         rs = await asyncio.gather(*[ask(n, {'op': 'get', 'detail': 0,
@@ -175,15 +180,24 @@ if __name__ == '__main__':
                          'caps': caps, 'run': r.get('run')})
             if r.get('sig'): pcache[n] = rows[-1]
         for n in [x for x in pcache if x not in peers]: pcache.pop(n, None)
-        return rows
+        if psig is None: return rows
+        sg = hashlib.md5(json.dumps(rows, sort_keys=True).encode()).hexdigest()[:12]
+        return {'same': 1} if psig == sg else {'rows': rows, 'psig': sg}
     @app.get('/api/{name}/messages')
-    async def api_messages(name: str, detail: int = 1, sig: str = None): return out(await ask(name, {'op': 'get', 'detail': detail, 'sig': sig}))
+    async def api_messages(name: str, detail: int = 1, sig: str = None, since: int = 0): return out(await ask(name, {'op': 'get', 'detail': detail, 'sig': sig, 'since': since}))
     @app.get('/api/{name}/seg/{i}/{j}')
     async def api_seg(name: str, i: int, j: int, off: int = 0): return out(await ask(name, {'op': 'seg', 'i': i, 'j': j, 'off': off}))
     @app.post('/api/{name}/put')
     async def api_put(name: str, body: dict): return out(await ask(name, {'op': 'put_task', 'text': body.get('text', '')}))
     @app.post('/api/{name}/abort')
     async def api_abort(name: str): return out(await ask(name, {'op': 'abort'}))
+    # ---- optional P2P pairing; delete this block to remove it completely ----
+    try:
+        from hub_p2p import install as _install_p2p
+        _install_p2p(app, web_port=WEB_PORT, token=TOKEN, here=HERE)
+    except Exception:
+        pass  # missing plug-in/client/dependency must not affect the hub
+
     @app.get('/')
     async def index(): return FileResponse(os.path.join(HERE, 'hub.html'))
     @app.get('/vendor/{f}')
