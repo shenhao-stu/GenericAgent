@@ -3736,6 +3736,100 @@ class GenericAgentTUI(App[None]):
         if size != self._last_size:
             self._last_size = size
             self._apply_responsive_layout()
+        self._drain_hub_inbox()
+
+    # ---------------- GA hub bridge (optional; drives the phone's PC-Link view) ----------------
+    # One peer per session, so the phone's session list mirrors this sidebar one-for-one.
+    # Every hook below runs on the hub's own thread and only ever reads plain attributes off
+    # `agent` or appends to a list — the Textual UI is touched exclusively from _drain_hub_inbox,
+    # which runs on the UI thread. hub/websockets missing => silently no peer, host unaffected.
+    def _hub_attach(self, sess) -> None:
+        try:
+            # Not a bare `import hub`: chatapp_common puts the repo root ahead of
+            # frontends/ on sys.path, and on Windows the root's hub.pyw (the tkinter
+            # service launcher — `.pyw` is an import suffix there) shadows that name,
+            # which made this whole bridge silently no-op.
+            from frontends import hub
+        except Exception:
+            return
+        sid = sess.agent_id
+        agent = sess.agent
+        agent._hub_inbox = []
+
+        def _live():
+            return self.sessions.get(sid)
+
+        def _busy():
+            s = _live()
+            return bool(s and s.status in ("running", "stopping"))
+
+        def _put(text):
+            s = _live()
+            if s is None:
+                return {"error": f"session {sid} gone", "code": "gone"}
+            if _busy():                      # a remote must not cut in line (hub.connect's own rule)
+                return {"error": f"session {s.name} is busy", "code": "busy"}
+            agent._hub_inbox.append(text)    # the UI's unified entrance sends it; see _drain_hub_inbox
+
+        def _abort():
+            s = _live()
+            if s is None:
+                return {"error": f"session {sid} gone", "code": "gone"}
+            agent.abort()
+
+        try:
+            hub.serve()                      # best effort: bring up a local hub if none is listening
+        except Exception:
+            pass
+        try:
+            sess.hub = hub.HubClient(f"tui/{sess.name}", put_task=_put,
+                                     get_outputs=lambda: getattr(agent, "all_outputs", None) or [],
+                                     abort=_abort, state=lambda: {"run": _busy()}).start()
+        except Exception:
+            sess.hub = None
+
+    def _hub_detach(self, sess) -> None:
+        client = getattr(sess, "hub", None)
+        sess.hub = None
+        if client is None:
+            return
+        try:
+            client.stop()                    # else a closed session haunts /api/peers forever
+        except Exception:
+            pass
+
+    def _drain_hub_inbox(self) -> None:
+        """Feed one parked remote message per tick through the same entrance as typing.
+
+        current_id is *borrowed* for that call (submit_user_message/_dispatch_command both route by
+        `self.current`) and always handed back: half the UI binds `self.current` late, at callback
+        time (world-line restore, model/effort pickers), so a timer that leaves the switch in place
+        makes the user's next confirmation land on a session they cannot even see — a restore then
+        rewrites *that* session's workspace files, projection log and live LLM history. Same
+        save/restore shape as _answer_ask_user; the phone tails its own peer, so nothing about the
+        remote's view needs the switch to stick."""
+        for sid, sess in list(self.sessions.items()):
+            box = getattr(sess.agent, "_hub_inbox", None)
+            if not box or sess.status in ("running", "stopping"):
+                continue
+            try:
+                text = box.pop(0)
+            except IndexError:
+                continue
+            parts = text.split(maxsplit=1) if text.startswith("/") else []
+            cmd = parts[0][1:].lower() if parts else ""
+            prev = self.current_id
+            try:
+                self.current_id = sid
+                if cmd in self._handlers:        # slash commands dispatch, exactly as when typed
+                    self._dispatch_command(cmd, parts[1].split() if len(parts) > 1 else [], raw=text)
+                else:
+                    self.submit_user_message(text)
+            finally:
+                if self.current_id == sid and sid != prev and prev in self.sessions:
+                    self.current_id = prev       # a handler may have switched on purpose: don't undo that
+                    self._refresh_all()
+            return                               # one per tick: keeps the 0.5s cadence honest
 
     def _patch_auto_scroll_for_selection(self) -> None:
         # Make selection-drag into #input still scroll #messages: include _select_start as a
@@ -3855,6 +3949,7 @@ class GenericAgentTUI(App[None]):
         sess.thread = thread
         self.sessions[agent_id] = sess
         self.current_id = agent_id
+        self._hub_attach(sess)
         self._install_ask_user_hook(sess)
         self._install_intervene_replay_hook(sess)
         self._install_write_snapshot_hook()
@@ -4353,6 +4448,7 @@ class GenericAgentTUI(App[None]):
         self._rewind_timer = self.set_timer(2.0, self._disarm_rewind)
 
     def _stop_session_runtime(self, session) -> None:
+        self._hub_detach(session)
         session.agent.abort()
         session.agent.task_queue.put("__shutdown__")
         thread = getattr(session, "thread", None)
@@ -5236,13 +5332,22 @@ class GenericAgentTUI(App[None]):
         if not (store.nodes and store.root_id in store.nodes):
             self._system("No rewindable checkpoints."); return  # 连一轮真实提问都没有
         # 三栏全屏可视化器(§3–§7):左压缩树 / 右上折叠段 / 右下详情+操作。
-        self.push_screen(RewindTreeScreen(store), self._on_rewind_tree_result)
+        # 会话在**推屏时**绑定(不是回调时取 self.current):树里的每个节点都只属于这个 store,
+        # 而用户在树里浏览的这几分钟内前台会话可能已经变了(手动切换/远端消息)。
+        self.push_screen(RewindTreeScreen(store), lambda r, s=sess: self._on_rewind_tree_result(s, r))
 
-    def _on_rewind_tree_result(self, result) -> None:
+    def _on_rewind_tree_result(self, sess, result) -> None:
         # 三栏屏回调:None=取消/已内联处理(diff/delete);dict=恢复请求。
+        # sess = 打开这棵树的那个会话。回退会改工作区文件 + 重写投影日志 + 截断 LLM 历史,
+        # 落错会话就是不可逆的破坏,所以只认它;_cmd_rewind_tree 里那道 running 守卫此刻已过期,重检一次。
         if not isinstance(result, dict) or result.get("action") != "restore":
             return
-        self._system(self._rw_restore_node(self.current, result.get("node"),
+        if self.sessions.get(sess.agent_id) is not sess or sess.status in ("running", "stopping"):
+            self._system("⚠️ 该会话已关闭或正在运行，已取消本次回退。"); return
+        if sess.agent_id != self.current_id:   # _rw_restore_node 之后的重挂/prefill 只作用于前台
+            self.current_id = sess.agent_id
+            self._refresh_all()
+        self._system(self._rw_restore_node(sess, result.get("node"),
                                            mode=result.get("mode", "both"),
                                            to=result.get("to", "before")))
 
@@ -5525,7 +5630,7 @@ class GenericAgentTUI(App[None]):
             role="system",
             content=f"选择模型 (当前: {cur} · 输入过滤或自定义名称 · ↑/↓ 移动，Enter 确认，Esc 取消)",
             kind="choice", choices=[],
-            on_select=lambda v: model_cmd.set_model(self.current.agent, v),
+            on_select=lambda v: model_cmd.set_model(agent, v),   # 绑打开时的 agent, 不是选中时的前台
         )
         msg.searchable = True
         msg.free_input = True
@@ -5568,7 +5673,7 @@ class GenericAgentTUI(App[None]):
             content=(f"选择 reasoning effort (当前: {cur or '未设置'} · "
                      "↑/↓ 移动，Enter 确认，Esc 取消)"),
             kind="choice", choices=choices,
-            on_select=lambda v: model_cmd.set_effort(self.current.agent, v),
+            on_select=lambda v: model_cmd.set_effort(agent, v),  # 绑打开时的 agent, 不是选中时的前台
         )
         self.current.messages.append(msg)
         self._refresh_messages()

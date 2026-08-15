@@ -9,7 +9,9 @@ from p2p_ws_client import HTTPExporter, connect_saved, create_code, load_room, s
 
 
 def install(app, *, web_port, token, here):
-    signal = os.environ.get("GA_P2P_SIGNAL", "ws://47.101.182.29:49157/ws")
+    # 与手机端 pclink._SIGNAL_DEFAULT 同源: 自有域名 443/TLS。裸 IP 非标端口在国内移动网络上
+    # 是"连得上、发数据即断", 手机侧根本走不完短码换房(2026-08-14 真机实测)。
+    signal = os.environ.get("GA_P2P_SIGNAL", "wss://p2p.gaagent.ai/ws")
     name = os.environ.get("GA_P2P_NAME", "ga-hub-phone")
     rooms = Path(os.environ.get("GA_P2P_ROOMS", "~/.p2p_ws/rooms.json")).expanduser()
     state = {"task": None, "invite": None, "status": "idle", "error": None,
