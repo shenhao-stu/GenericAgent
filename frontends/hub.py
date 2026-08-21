@@ -202,8 +202,23 @@ if __name__ == '__main__':
     async def api_messages(name: str, detail: int = 1, sig: str = None, since: int = 0): return out(await ask(name, {'op': 'get', 'detail': detail, 'sig': sig, 'since': since}))
     @app.get('/api/{name}/seg/{i}/{j}')
     async def api_seg(name: str, i: int, j: int, off: int = 0): return out(await ask(name, {'op': 'seg', 'i': i, 'j': j, 'off': off}))
+    put_seen = {}   # ikey -> (ts, outcome|None): put 幂等窗(r15)。手机端对同 peer 同文案的重试沿用同一 ikey;
+    # WS send 一旦发生就算「已投递」(peer 多半已执行, 只是应答超了 15s 窗), 同键重放绝不能再投一次 ——
+    # 这正是「手机新建会话, PC 冒出两个」的重试路径。未离开 hub 的失败(offline/gone/busy/badop/nosupport)放行重试。
     @app.post('/api/{name}/put')
-    async def api_put(name: str, body: dict): return out(await ask(name, {'op': 'put_task', 'text': body.get('text', '')}))
+    async def api_put(name: str, body: dict):
+        ik = str(body.get('ikey') or '')
+        now = time.time()
+        if ik:
+            for k in [k for k, (ts, _) in put_seen.items() if now - ts > 300]: put_seen.pop(k, None)
+            if ik in put_seen: return put_seen[ik][1] or {'ok': 1, 'dedup': 1}
+            put_seen[ik] = (now, None)                      # sent 标记先落: 并发同键第二发立即走上面的重放分支
+        r = await ask(name, {'op': 'put_task', 'text': body.get('text', '')})
+        code = r.get('code') if isinstance(r, dict) else None
+        if ik:
+            if code in ('offline', 'gone', 'busy', 'badop', 'nosupport'): put_seen.pop(ik, None)   # 没投出去, 允许重试
+            else: put_seen[ik] = (time.time(), None if code else r)  # timeout 也封键(已进 peer 的 WS); 封窗从应答时刻起算, 不吃掉 ask 的等待
+        return out(r)
     @app.post('/api/{name}/abort')
     async def api_abort(name: str): return out(await ask(name, {'op': 'abort'}))
     # ---- optional P2P pairing; delete this block to remove it completely ----
