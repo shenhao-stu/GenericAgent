@@ -113,6 +113,7 @@ def connect(agent, name=None, put_task=None, get_outputs=None, abort=None, fold=
     so remote tasks behave exactly like typed ones (bubble/stream/stop). Requires a live UI tab.
     Never raises: a broken hub must not break its host."""
     def _put(text):
+        if not isinstance(text, str): return {'error': 'text must be a string', 'code': 'badop'}
         if getattr(agent, 'is_running', False): return {'error': f'peer {name} is busy', 'code': 'busy'}
         agent._hub_inbox.append(text)   # no put_task here: the UI's unified entrance sends it
     try:
@@ -207,13 +208,15 @@ if __name__ == '__main__':
     # 这正是「手机新建会话, PC 冒出两个」的重试路径。未离开 hub 的失败(offline/gone/busy/badop/nosupport)放行重试。
     @app.post('/api/{name}/put')
     async def api_put(name: str, body: dict):
+        t = body.get('text', '')
+        if not isinstance(t, str): return JSONResponse({'error': 'text must be a string', 'code': 'badop'}, 400)
         ik = str(body.get('ikey') or '')
         now = time.time()
         if ik:
             for k in [k for k, (ts, _) in put_seen.items() if now - ts > 300]: put_seen.pop(k, None)
             if ik in put_seen: return put_seen[ik][1] or {'ok': 1, 'dedup': 1}
             put_seen[ik] = (now, None)                      # sent 标记先落: 并发同键第二发立即走上面的重放分支
-        r = await ask(name, {'op': 'put_task', 'text': body.get('text', '')})
+        r = await ask(name, {'op': 'put_task', 'text': t})
         code = r.get('code') if isinstance(r, dict) else None
         if ik:
             if code in ('offline', 'gone', 'busy', 'badop', 'nosupport'): put_seen.pop(ik, None)   # 没投出去, 允许重试
