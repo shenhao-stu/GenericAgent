@@ -12,7 +12,8 @@
     "alarms",
     "declarativeNetRequest",
     "management",
-    "contentSettings"
+    "contentSettings",
+    "storage"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

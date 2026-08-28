@@ -154,3 +154,51 @@ frontends/conductor_im_plugins/*
 
 # Beta 渠道：订阅门户插件（仅 beta 分发携带，不入库）
 plugins/subscription_portal.py
+
+# ops-kit 主机注册表本地覆盖（含 IP/密钥路径，不入库）
+memory/ops-kit/scripts/hosts.local.json
+
+# ── Fork-only local overlay ──
+# 本机专属忽略规则，非上游内容。曾于 2026-06 的一次 /update 中被 upstream 版覆盖丢失，此处恢复。
+# （conductor_im_plugins 已由上游 frontends/conductor_im_plugins/* 覆盖，无需重复）
+
+# Linuxdo monitor
+linuxdo_monitor/*
+
+# getoken (local-only panel utility)
+getoken-panel/
+
+.research
+plugins/
+
+.*
+docs/superpowers
+tuiapp_v4*
+
+projects/
+otpbridge/
+
+projects/gpt_protocol_pay/secrets/
+projects/gpt_protocol_pay/work/runs/
+
+
+# roxy_override: runtime state, logs and captured artifacts (contain account
+# tokens, full gate response bodies, and a real-window template) — never commit.
+roxy_override/traffic/
+roxy_override/*.log
+roxy_override/hook.log
+roxy_override/api_discovery.json
+roxy_override/ledger.json
+roxy_override/launch_row_template.json
+roxy_override/app.asar.original.bak
+roxy_override/node_modules/
+roxy_override/.patchwork*
+roxy_override/logs/
+roxy_override/roxyctl_state.json
+roxy_override/_src/
+roxy_override/__pycache__/
+roxy_override/_*.json
+roxy_override/_*.log
+# extensionless runtime markers: _ctl_token holds a live control-channel secret and
+# _debug_bodies turns on raw response capture — neither belongs in history.
+roxy_override/_*

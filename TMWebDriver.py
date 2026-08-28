@@ -9,20 +9,24 @@ def safe_print(*a, **k):
     except: pass
 
 class Session:
-    def __init__(self, session_id, info, client=None):
+    def __init__(self, session_id, info, client=None, client_id=None, tab_id=None):
         self.id = session_id
+        # Browser-side tab id; differs from self.id only when two profiles collide on a tab id.
+        self.tab_id = str(tab_id) if tab_id is not None else session_id
         self.info = info
         self.connect_at = time.time()
         self.disconnect_at = None
         self.type = info.get('type', 'ws')
         self.ws_client = client if self.type in ('ws', 'ext_ws') else None
         self.http_queue = client if self.type == 'http' else None
+        # Stable per Chrome-profile extension identity (see tmwd_cdp_bridge clientId).
+        self.client_id = client_id or info.get('client_id')
     @property
     def url(self): return self.info.get('url', '')
     def is_active(self):
         if self.type == 'http' and time.time() - self.connect_at > 60: self.mark_disconnected()
         return self.disconnect_at is None
-    def reconnect(self, client, info):
+    def reconnect(self, client, info, client_id=None):
         self.info = info
         self.type = info.get('type', 'ws')
         if self.type in ('ws', 'ext_ws'):
@@ -30,6 +34,10 @@ class Session:
             self.http_queue = None
         elif self.type == 'http':
             self.http_queue = client
+        if client_id is not None:
+            self.client_id = client_id
+        elif info.get('client_id') is not None:
+            self.client_id = info.get('client_id')
         self.connect_at = time.time()
         self.disconnect_at = None
     def mark_disconnected(self):
@@ -37,10 +45,88 @@ class Session:
         self.disconnect_at = time.time()
 
 
+def apply_ext_tabs_update(sessions, ext_clients, ws_client, client_id, tabs, *, log=safe_print):
+    """Apply one extension's tab snapshot without touching other profiles.
+
+    Pure-ish helper (mutates sessions/ext_clients) so multi-profile ownership can be unit-tested.
+
+    Rules:
+    1. Identify the sender by stable ``client_id`` (fallback: anon:<id(ws)>).
+    2. If the same client_id reconnects on a new WebSocket, transfer ownership first.
+    3. Prune ONLY tabs owned by this client_id that are missing from the snapshot.
+    4. Never steal an active tab owned by a different client_id: tab ids are unique
+       per browser only, so a colliding tab is registered under ``client_id:tab_id``
+       instead of being dropped.
+    """
+    client_id = client_id or f"anon:{id(ws_client)}"
+    prev = ext_clients.get(client_id)
+    if prev is not None and prev is not ws_client:
+        # SW restart / reconnect: move this profile's sessions onto the new socket.
+        for sess in sessions.values():
+            if sess.type == 'ext_ws' and sess.client_id == client_id:
+                sess.ws_client = ws_client
+        log(f"ext client {client_id} transferred to new WS {getattr(ws_client, 'address', ws_client)}")
+    ext_clients[client_id] = ws_client
+
+    current_tab_ids = {str(tab.get('id')) for tab in tabs if tab.get('id') is not None}
+    log(f"tabs update client={client_id} tabs={current_tab_ids}")
+
+    for sess in list(sessions.values()):
+        if sess.type != 'ext_ws':
+            continue
+        if sess.client_id != client_id:
+            continue
+        if sess.tab_id not in current_tab_ids:
+            sess.mark_disconnected()
+
+    claimed, fresh, namespaced = [], [], []
+    for tab in tabs:
+        if tab.get('id') is None:
+            continue
+        tab_id = str(tab['id'])
+        info = {
+            'url': tab.get('url'),
+            'title': tab.get('title', ''),
+            'connected_at': time.time(),
+            'type': 'ext_ws',
+            'client_id': client_id,
+        }
+        sid = tab_id
+        ns_key = f"{client_id}:{tab_id}"
+        if ns_key in sessions:
+            # Once namespaced, this client keeps its own key — never touch the plain one.
+            sid = ns_key
+        else:
+            sess = sessions.get(sid)
+            if sess and sess.is_active() and sess.client_id and sess.client_id != client_id:
+                # Tab-id collision across profiles: give this one its own namespaced key.
+                sid = ns_key
+                namespaced.append(sid)
+                log(f"tab {tab_id} owned by other client, registered as {sid}")
+        sess = sessions.get(sid)
+        if sess and sess.is_active():
+            sess.info = info
+            sess.ws_client = ws_client
+            sess.client_id = client_id
+        elif sess is None:
+            sessions[sid] = Session(sid, info, ws_client, client_id=client_id, tab_id=tab_id)
+            fresh.append(sid)
+            log(f"New tab connected: {info.get('url')} (Session: {sid}, client: {client_id})")
+        else:
+            sess.reconnect(ws_client, info, client_id=client_id)
+            fresh.append(sid)
+            log(f"Tab reconnected: {info.get('url')} (Session: {sid}, client: {client_id})")
+        claimed.append(sid)
+    return {'client_id': client_id, 'claimed': claimed, 'fresh': fresh,
+            'namespaced': namespaced, 'current': list(current_tab_ids)}
+
+
 class TMWebDriver:  
     def __init__(self, host: str = '127.0.0.1', port: int = 18765):  
         self.host, self.port = host, port
         self.sessions, self.results, self.acks = {}, {}, {}
+        # client_id -> current WebSocket for that Chrome-profile extension instance
+        self.ext_clients = {}
         self.default_session_id = None  
         self.latest_session_id = None  
         self.is_remote = socket.socket().connect_ex((host, port+1)) == 0
@@ -134,19 +220,17 @@ class TMWebDriver:
                             'connected_at': time.time(), 'type': 'ws'}  
                         driver._register_client(session_id, self, session_info)  
                     elif data.get('type') in ['ext_ready', 'tabs_update']:
-                        tabs = data.get('tabs', [])
-                        current_tab_ids = {str(tab['id']) for tab in tabs}
-                        safe_print(f"Received tabs update: {current_tab_ids}")
-                        for sid in list(driver.sessions.keys()):
-                            sess = driver.sessions[sid]
-                            if sess.type == 'ext_ws' and sid not in current_tab_ids:
-                                sess.mark_disconnected()
-                        for tab in tabs:
-                            session_id = str(tab['id'])
-                            session_info = {'url': tab.get('url'), 'title': tab.get('title', ''), 'connected_at': time.time(), 'type': 'ext_ws'}
-                            sess = driver.sessions.get(session_id)
-                            if sess and sess.is_active(): sess.info = session_info
-                            else: driver._register_client(session_id, self, session_info)
+                        result = apply_ext_tabs_update(
+                            driver.sessions,
+                            driver.ext_clients,
+                            self,
+                            data.get('clientId') or data.get('client_id'),
+                            data.get('tabs') or [],
+                        )
+                        driver._apply_tabs_result(result)
+                    elif data.get('type') == 'ping':
+                        try: self.send_message('{"type":"pong"}')
+                        except Exception: pass
                     elif data.get('type') == 'ack': driver.acks[data.get('id','')] = True
                     elif data.get('type') == 'result':  
                         driver.results[data.get('id')] = {'success': True, 'data': data.get('result'), 'newTabs': data.get('newTabs', [])}  
@@ -166,24 +250,50 @@ class TMWebDriver:
         server_thread.start()  
         safe_print(f"WebSocket server running on ws://{self.host}:{self.port}")  
     
-    def _register_client(self, session_id: str, client: WebSocket, session_info) -> None:  
+    def _apply_tabs_result(self, result) -> None:
+        # Only a new/reconnected tab moves the implicit default;
+        # a refresh snapshot must not hijack it from another profile.
+        if result['fresh']:
+            self.latest_session_id = result['fresh'][-1]
+        if self.default_session_id is None and result['claimed']:
+            self.default_session_id = result['claimed'][0]
+
+    def _register_client(self, session_id: str, client: WebSocket, session_info, client_id=None) -> None:
         is_new_session = session_id not in self.sessions
+        client_id = client_id or session_info.get('client_id')
 
         if is_new_session:
-            session = Session(session_id, session_info, client)
+            session = Session(session_id, session_info, client, client_id=client_id)
             self.sessions[session_id] = session            
-            safe_print(f"New tab connected: {session.url} (Session: {session_id})")  
+            safe_print(f"New tab connected: {session.url} (Session: {session_id}, client: {client_id})")  
         else:
             session = self.sessions[session_id]
-            session.reconnect(client, session_info)
-            safe_print(f"Tab reconnected: {session.url} (Session: {session_id})")  
+            # Never let a different Chrome profile steal an active tab id.
+            if (
+                session.is_active()
+                and session.client_id
+                and client_id
+                and session.client_id != client_id
+            ):
+                safe_print(
+                    f"refuse register steal tab {session_id}: "
+                    f"owned by {session.client_id}, claimed by {client_id}"
+                )
+                return
+            session.reconnect(client, session_info, client_id=client_id)
+            safe_print(f"Tab reconnected: {session.url} (Session: {session_id}, client: {client_id})")  
 
         self.latest_session_id = session_id
         if self.default_session_id is None: self.default_session_id = session_id 
     
-    def _unregister_client(self, client: WebSocket) -> None:  
+    def _unregister_client(self, client: WebSocket) -> None:
+        dead_clients = [cid for cid, ws in self.ext_clients.items() if ws is client]
+        for cid in dead_clients:
+            del self.ext_clients[cid]
+            safe_print(f"ext client gone: {cid}")
         for session in self.sessions.values():
-            if session.ws_client == client: session.mark_disconnected()
+            if session.ws_client is client:
+                session.mark_disconnected()
     
     def execute_js(self, code, timeout=15, session_id=None) -> Any:  
         if session_id is None: session_id = self.default_session_id  
@@ -212,7 +322,7 @@ class TMWebDriver:
             raise ValueError(f"Unsupported session type: {tp}")
         exec_id = str(uuid.uuid4())  
         payload_dict = {'id': exec_id, 'code': code}
-        if tp == 'ext_ws': payload_dict['tabId'] = int(session.id)
+        if tp == 'ext_ws': payload_dict['tabId'] = int(session.tab_id)
         payload = json.dumps(payload_dict)
 
         if tp in ['ws', 'ext_ws']: session.ws_client.send_message(payload)  
@@ -255,8 +365,17 @@ class TMWebDriver:
     def get_all_sessions(self):  
         if self.is_remote:
             return self._remote_cmd({"cmd": "get_all_sessions"}).get('r', [])
-        return [{'id': session.id, **session.info} for session in self.sessions.values()
-                if session.is_active()]  
+        out = []
+        for session in self.sessions.values():
+            if not session.is_active():
+                continue
+            item = {'id': session.id, **session.info}
+            if session.client_id:
+                item['client_id'] = session.client_id
+            if session.type == 'ext_ws':
+                item['tab_id'] = session.tab_id
+            out.append(item)
+        return out
 
     def get_session_dict(self):
         return {session['id']: session['url'] for session in self.get_all_sessions()}

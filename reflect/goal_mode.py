@@ -103,11 +103,28 @@ def check():
         turn=turn
     )
 
+def _error_sig(result):
+    if not isinstance(result, str): return None
+    for marker in ('!!!Error', '[ERROR]'):
+        i = result.find(marker)
+        if i >= 0: return result[i:i+80]
+    return None
+
 def on_done(result):
     state = _load()
     if state is None: return
-    
+
     if state.get('status') == 'wrapping_up':
         state['status'] = 'done_budget'
         state['end_time'] = time.time()
         _save(state)
+        return
+
+    # 熔断：同一硬错误（如上游402/401）连续出现说明重试不会变，别烧完预算
+    sig = _error_sig(result)
+    state['same_error_streak'] = state.get('same_error_streak', 0) + 1 if sig and sig == state.get('last_error_sig') else (1 if sig else 0)
+    state['last_error_sig'] = sig
+    if state['same_error_streak'] >= 3 and state.get('status') == 'running':
+        state['status'] = 'stopped'
+        state['stop_reason'] = f"circuit-break: same hard error x{state['same_error_streak']}: {sig}"
+    _save(state)

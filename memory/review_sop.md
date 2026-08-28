@@ -67,7 +67,8 @@
 | 空 / 模糊 | 默认审本次 uncommitted 改动 |
 | 非 git 仓库 | 提示用户塞路径,本轮结束 |
 
-**先把范围列出来发给用户确认**,再开始 `file_read`。
+锁定范围后**直接开审,不要 ask_user**;实际审了什么写进报告的 `## Scope` 段。
+（与 `review_sop/review_inline_prompt.txt` 保持一致——那份 prompt 才是运行时真相源。）
 
 ### 步骤 3:逐文件 file_read
 

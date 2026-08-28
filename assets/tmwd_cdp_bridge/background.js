@@ -76,6 +76,16 @@ async function handleExtMessage(msg, sender) {
       return { ok: true };
     } catch (e) { return { ok: false, error: e.message }; }
   }
+  if (msg.cmd === 'bridgeInfo') {
+    return {
+      ok: true,
+      data: {
+        clientId: await getBridgeClientId(),
+        wsState: ws ? ws.readyState : -1,
+        extensionId: chrome.runtime.id
+      }
+    };
+  }
   return { ok: false, error: 'Unknown cmd: ' + msg.cmd };
 }
 
@@ -86,6 +96,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 async function handleCookies(msg, sender) {
   try {
+    // set / remove support for multi-domain session rotation
+    if (msg.method === 'set') {
+      const details = { ...(msg.details || {}) };
+      if (!details.url && msg.url) details.url = msg.url;
+      const ok = await chrome.cookies.set(details);
+      return { ok: !!ok, data: ok };
+    }
+    if (msg.method === 'remove') {
+      const details = { ...(msg.details || {}) };
+      if (!details.url && msg.url) details.url = msg.url;
+      if (!details.name && msg.name) details.name = msg.name;
+      const res = await chrome.cookies.remove(details);
+      return { ok: !!res, data: res };
+    }
+    if (msg.method === 'clearNames') {
+      const names = new Set(msg.names || []);
+      const urls = msg.urls || [msg.url].filter(Boolean);
+      const removed = [];
+      for (const url of urls) {
+        const all = await chrome.cookies.getAll({ url });
+        for (const c of all) {
+          if (names.size && !names.has(c.name)) continue;
+          const host = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
+          const u = `${c.secure ? 'https' : 'http'}://${host}${c.path || '/'}`;
+          await chrome.cookies.remove({ url: u, name: c.name });
+          removed.push(`${c.domain}:${c.name}`);
+        }
+      }
+      return { ok: true, data: removed };
+    }
+
     let url = msg.url || sender.tab?.url;
     if (!url && msg.tabId) {
       const tab = await chrome.tabs.get(msg.tabId);
@@ -208,6 +249,34 @@ function buildCdpScript(code) {
   return buildExecScript(code, `
       return { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' } };
   `);
+}
+
+// --- Multi-profile client identity (stable across SW restarts in this profile) ---
+// Memoize the promise, not the value: concurrent first-run callers must not mint two ids.
+let bridgeClientIdPromise = null;
+
+function getBridgeClientId() {
+  if (!bridgeClientIdPromise) bridgeClientIdPromise = mintBridgeClientId();
+  return bridgeClientIdPromise;
+}
+
+async function mintBridgeClientId() {
+  try {
+    const stored = await chrome.storage.local.get(['tmwdBridgeClientId']);
+    if (stored.tmwdBridgeClientId) return stored.tmwdBridgeClientId;
+  } catch (_) {}
+  const id = 'tmwd-' + crypto.randomUUID();
+  try { await chrome.storage.local.set({ tmwdBridgeClientId: id }); } catch (_) {}
+  return id;
+}
+
+async function buildTabsPayload() {
+  const clientId = await getBridgeClientId();
+  const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url) && !/streamlit/i.test(t.title || ''));
+  return {
+    clientId,
+    tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
+  };
 }
 
 // --- WebSocket Client for TMWebDriver ---
@@ -354,12 +423,13 @@ function connectWS() {
     console.log('[TMWD-WS] Connected!');
     setStatus('connected');
     scheduleKeepalive(); // Keep SW alive while connected
-    const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
+    const payload = await buildTabsPayload();
     ws.send(JSON.stringify({
       type: 'ext_ready',
-      tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
+      clientId: payload.clientId,
+      tabs: payload.tabs
     }));
-    console.log('[TMWD-WS] Sent ext_ready with', tabs.length, 'tabs');
+    console.log('[TMWD-WS] Sent ext_ready clientId=', payload.clientId, 'tabs=', payload.tabs.length);
   };
   ws.onmessage = async (event) => {
     try {
@@ -409,10 +479,11 @@ chrome.runtime.onInstalled.addListener(() => connectWS());
 // Sync tab list on changes
 async function sendTabsUpdate() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url) && !/streamlit/i.test(t.title));
+  const payload = await buildTabsPayload();
   ws.send(JSON.stringify({
     type: 'tabs_update',
-    tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
+    clientId: payload.clientId,
+    tabs: payload.tabs
   }));
 }
 chrome.tabs.onUpdated.addListener((_, changeInfo) => {

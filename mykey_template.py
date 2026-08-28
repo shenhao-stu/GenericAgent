@@ -311,3 +311,38 @@ mixin_config = {
 #     'secret_key': 'sk-lf-...',
 #     'host': 'https://cloud.langfuse.com',   # 或自托管地址
 # }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Coding-plan OAuth 网关（可选；plugins/coding_oauth）——用浏览器登录各家 coding
+#  plan，直接消耗订阅额度。不改 GA 核心，即插即用。支持 codex/claude/grok/copilot/
+#  glm/qwen/kimi。登录后配置会自动写入本文件（GA 热加载生效），无需手动粘贴。
+# ──────────────────────────────────────────────────────────────────────────────
+#  1. 登录（会打开你的真实浏览器；--autostart 顺便开启随 GA 自启）：
+#       ga oauth login codex --autostart   # OpenAI Codex
+#       ga oauth login claude              # Anthropic Claude Pro/Max（把页面给的 code 粘回终端）
+#       ga oauth login grok / copilot / qwen / kimi
+#       ga oauth login glm                 # 智谱 Z.ai（--provider bigmodel 走 BigModel）
+#       ga oauth login glm --api-key <KEY> # 或直接用 API Key，跳过 OAuth
+#  2. 起网关（若没开 autostart）：ga oauth serve --port 8788
+#  3. 直接正常用 GA 即可。ga oauth status 看登录态与网关是否在跑。
+#  详见 plugins/coding_oauth/README.md。
+#
+#  下面这些通常由 `ga oauth login` 自动写入；手动填也行（apikey 只是占位）：
+# native_oai_config_codex_plan = {
+#     'name': 'codex_plan',
+#     'apikey': 'coding-oauth',                     # 占位；网关注入真实 token
+#     'apibase': 'http://127.0.0.1:8788/codex',     # /grok /copilot /qwen /glm-oai 同理
+#     'model': 'gpt-5.1-codex',                     # 填你套餐允许的模型
+#     'api_mode': 'responses',                      # grok/copilot/qwen 用 'chat_completions'
+#     'read_timeout': 600,
+# }
+# native_claude_config_claude_plan = {              # claude / kimi / glm 走 Anthropic 协议
+#     'name': 'claude_plan',
+#     'apikey': 'coding-oauth',
+#     'apibase': 'http://127.0.0.1:8788/claude',    # /kimi /glm 同理
+#     'model': 'claude-opus-4-6',
+#     'fake_cc_system_prompt': True,                # OAuth 通道必须置 True
+# }
+#
+#  可选：让网关随 GA 自动起（守护线程；端口已占用则自动跳过）：
+# coding_oauth = {'autostart': True, 'port': 8788, 'proxy': None}

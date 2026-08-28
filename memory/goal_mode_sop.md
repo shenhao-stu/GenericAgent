@@ -43,6 +43,8 @@ set GOAL_STATE=temp/goal_xxx.json && start /b python agentmain.py --reflect refl
 
 - 预算耗尽时自动进入收口轮，然后停止
 - 手动停：杀进程
+- **熔断（reflect 侧兜底 + agent 侧自守）**：`reflect/goal_mode.py` 的 `on_done` 会统计连续同签名硬错误（`!!!Error`/`[ERROR]`），**连续 3 轮同一错误自动把 status 置 `stopped`**（写 `stop_reason`）——这覆盖模型层 402/401 时 agent 根本跑不起来、无法自救的情形（实测教训：201 轮全烧在同一个 `HTTP 402 plan_expired` 上，零产出）。
+  agent 能跑但工具/上游反复同错时，同样判据自守：错误不随重试改变就把 state 的 `status` 改 `"stopped"` 并写原因，别指望第 N 轮会不一样。
 
 ## 观察进度
 

@@ -7,3 +7,6 @@ L1 Insight is a minimal index; sync L1 when L2/L3 changes; keep index minimal. R
 3. Execute step by step, control granularity, limit blast radius; request intervention after 3 failures
 4. Key/secret files: reference only, never read or move
 5. Read META-SOP to verify before writing any memory; files under memory/ must be patched only (unless creating new)
+6. Before overwriting or deleting anything irreversible (credentials, configs, data), back up the original under temp/ and report the backup path
+7. Before claiming "fixed / done", actually run an end-to-end check and paste its output; if you didn't run it, say "unverified"
+8. Default to executing directly: no plan files, no exploration/verification subagents, no ceremonial self-checks; add one independent verification only for irreversible actions, user-facing deliverables, or large multi-file changes

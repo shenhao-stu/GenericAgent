@@ -80,6 +80,12 @@ COMMANDS = {
         "desc": "以原生窗口形式包装 stapp Web 界面（基于 pywebview）",
         "cmd": ["python", "{PROJECT_DIR}/launch.pyw"],
     },
+    "oauth": {
+        "help": "各厂商 coding plan OAuth 登录网关 (plugins/coding_oauth)",
+        "desc": "浏览器登录 Codex/Claude/Grok/Copilot/GLM/Qwen/Kimi 等 coding plan，"
+                "直接消耗订阅额度。子命令: login <厂商> / serve / status / config / routes",
+        "cmd": ["python", "-m", "plugins.coding_oauth"],
+    },
     "status": {
         "help": "检查运行状态",
         "desc": "检查当前是否已有 GenericAgent 进程在运行",
