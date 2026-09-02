@@ -1,6 +1,6 @@
 # GenericAgent React Desktop 2.0 — compiled distribution
 
-This directory contains generated HTML, JavaScript, CSS, fonts, images, and license notices for the
+This directory contains the v0.2.1 generated HTML, JavaScript, CSS, fonts, images, and license notices for the
 GenericAgent React Desktop 2.0 renderer. It is build output, not the React development tree.
 
 ## Source and contributions
@@ -9,7 +9,7 @@ The public React source of truth and the place for renderer issues, pull request
 
 - <https://github.com/abraxas914/GenericAgent>
 - Exact source used for this distribution:
-  [`9fe5d69b85cfad8778ace84b6f69bc75f9e0d392`](https://github.com/abraxas914/GenericAgent/commit/9fe5d69b85cfad8778ace84b6f69bc75f9e0d392)
+  [`4a67226e18cb003db1210357ea4a283774773acc`](https://github.com/abraxas914/GenericAgent/commit/4a67226e18cb003db1210357ea4a283774773acc)
 
 Over the two-month React Desktop 2.0 development cycle, [abraxas914](https://github.com/abraxas914) led the new
 renderer architecture and UI, Desktop bridge and Tauri integration, startup and recovery surfaces, package
