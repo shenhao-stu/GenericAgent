@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { Dropdown, Modal } from '@douyinfe/semi-ui';
 import type { SessionInfo } from '../../services/chat';
 import { useChatStore } from '../../stores/chat';
 import { useI18n } from '../../i18n';
 import { Codicon } from '../../lib/icons';
 import { LiveDuration } from './LiveDuration';
+import { SessionRenameInput } from './SessionRenameInput';
 import { displayTitle, formatAge, isPlaceholderTitle } from './sessionList';
 
 export function SessionRow({
@@ -26,44 +27,22 @@ export function SessionRow({
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
-  const [renameValue, setRenameValue] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (renaming) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [renaming]);
 
   const handleRenameStart = useCallback(() => {
-    setRenameValue(isPlaceholderTitle(session.title) ? '' : session.title.trim());
     setRenaming(true);
     setMenuOpen(false);
-  }, [session.title]);
+  }, []);
 
-  const handleRenameConfirm = useCallback(() => {
-    const trimmed = renameValue.trim();
-    if (trimmed && trimmed !== session.title) {
-      renameSession(session.id, trimmed);
+  const handleRenameConfirm = useCallback((title: string) => {
+    if (title && title !== session.title) {
+      renameSession(session.id, title);
     }
     setRenaming(false);
-  }, [renameValue, session.id, session.title, renameSession]);
+  }, [session.id, session.title, renameSession]);
 
   const handleRenameCancel = useCallback(() => {
     setRenaming(false);
   }, []);
-
-  const handleRenameKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleRenameConfirm();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      handleRenameCancel();
-    }
-  }, [handleRenameConfirm, handleRenameCancel]);
 
   const handlePin = useCallback(() => {
     setMenuOpen(false);
@@ -109,14 +88,11 @@ export function SessionRow({
       <span className="ga-session-content">
         <span className={`ga-status-dot${isWorking ? ' working' : ''}`} />
         {renaming ? (
-          <input
-            ref={inputRef}
+          <SessionRenameInput
             className="ga-session-rename-input"
-            value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onKeyDown={handleRenameKeyDown}
-            onBlur={handleRenameConfirm}
-            onClick={(e) => e.stopPropagation()}
+            initial={isPlaceholderTitle(session.title) ? '' : session.title.trim()}
+            onConfirm={handleRenameConfirm}
+            onCancel={handleRenameCancel}
           />
         ) : (
           <span className="ga-session-title" title={session.cwd || undefined}>

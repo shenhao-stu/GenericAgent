@@ -7,7 +7,7 @@ import { useSettingsStore } from '../../stores/settings';
 import { useChatStore } from '../../stores/chat';
 import { useI18n } from '../../i18n';
 import { shortcutFor } from '../../hooks/useGlobalShortcuts';
-import { filterSessions, sortSessions } from './sessionList';
+import { filterSessions, groupSessions, sortSessions } from './sessionList';
 import { SessionSectionHeader } from './SessionSectionHeader';
 import { SessionRow } from './SessionRow';
 import { BridgeMenuPanel } from './BridgeMenuPanel';
@@ -45,6 +45,9 @@ export function LeftSidebar() {
   }, []);
 
   const filtered = filterSessions(sortSessions(sessions), searchQuery);
+  // Search results stay flat (relevance is the query); browsing gets recency buckets, labelled only when there are several.
+  const groups = searchQuery ? [{ key: 'all' as const, sessions: filtered }] : groupSessions(filtered);
+  const showGroupLabels = groups.length > 1;
   const newSessionLabel = t('nav.chatShortcut', { shortcut: shortcutFor('n') });
 
   function handleNewSession() {
@@ -117,14 +120,21 @@ export function LeftSidebar() {
             </div>
           ) : (
             <div className="ga-session-list">
-              {filtered.map((s) => (
-                <SessionRow
-                  key={s.id}
-                  session={s}
-                  isActive={s.id === activeSessionId}
-                  isWorking={runningSessions.has(s.id)}
-                  onClick={() => handleSelectSession(s.id)}
-                />
+              {groups.map((group) => (
+                <div key={group.key} className="ga-session-group" data-group={group.key}>
+                  {showGroupLabels && (
+                    <div className="ga-session-group-label">{t(`conv.group.${group.key}`)}</div>
+                  )}
+                  {group.sessions.map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      isActive={s.id === activeSessionId}
+                      isWorking={runningSessions.has(s.id)}
+                      onClick={() => handleSelectSession(s.id)}
+                    />
+                  ))}
+                </div>
               ))}
             </div>
           )

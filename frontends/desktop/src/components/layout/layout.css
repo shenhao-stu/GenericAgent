@@ -250,6 +250,20 @@
   gap: 1px;
 }
 
+/* Recency buckets (pinned / today / yesterday / …): quiet labels, only shown when the list spans several. */
+.ga-session-group-label {
+  padding: 8px 8px 2px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--ui-text-tertiary);
+  user-select: none;
+}
+
+.ga-session-group:first-child .ga-session-group-label {
+  padding-top: 2px;
+}
+
 .ga-session-item {
   position: relative;
   display: flex;

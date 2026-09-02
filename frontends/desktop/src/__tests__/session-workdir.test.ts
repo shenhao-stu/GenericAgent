@@ -32,6 +32,7 @@ vi.mock('../services/ws', () => ({
     return () => mocks.wsHandlers.delete(type);
   },
   onBridgeStatusChange: vi.fn(),
+  getBridgeStatus: () => 'offline',
 }));
 
 vi.mock('../stores/settings', () => ({

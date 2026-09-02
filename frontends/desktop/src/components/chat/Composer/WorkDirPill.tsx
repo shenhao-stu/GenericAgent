@@ -5,15 +5,14 @@ import { useChatStore } from '../../../stores/chat';
 import { folderName } from './workdir';
 
 /**
- * Session working directory (#780). Before the first message it picks the folder the new session
- * will be bound to; once the session exists it shows the bound folder and reveals it on click.
+ * Picks the folder the next new session will be bound to (#780). Once a session exists its folder is
+ * shown by the thread header, so the pill only appears before the first message.
  */
 export function WorkDirPill() {
   const { t } = useI18n();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const pendingWorkDir = useChatStore((s) => s.pendingWorkDir);
   const setPendingWorkDir = useChatStore((s) => s.setPendingWorkDir);
-  const boundWorkDir = useChatStore((s) => s.sessions.find((session) => session.id === activeSessionId)?.workDir ?? null);
   const inTauri = typeof (window as any).__TAURI__?.core?.invoke === 'function';
 
   const pick = useCallback(async () => {
@@ -21,30 +20,24 @@ export function WorkDirPill() {
     if (picked) setPendingWorkDir(picked);
   }, [setPendingWorkDir, t]);
 
-  const reveal = useCallback(() => {
-    if (boundWorkDir) void tauriInvoke('reveal_in_file_manager', { path: boundWorkDir }).catch(() => {});
-  }, [boundWorkDir]);
+  if (!inTauri || activeSessionId) return null;
 
-  if (!inTauri) return null;
-  if (activeSessionId && !boundWorkDir) return null;
-
-  const dir = activeSessionId ? boundWorkDir! : pendingWorkDir;
-  const label = dir ? folderName(dir) : t('conv.cwdPick');
-  const tip = dir ? `${t('conv.cwd')}: ${dir}` : t('conv.cwdHint');
+  const label = pendingWorkDir ? folderName(pendingWorkDir) : t('conv.cwdPick');
+  const tip = pendingWorkDir ? `${t('conv.cwd')}: ${pendingWorkDir}` : t('conv.cwdHint');
 
   return (
-    <div data-slot="workdir-pill" data-bound={activeSessionId ? '' : undefined} data-set={dir ? '' : undefined}>
+    <div data-slot="workdir-pill" data-set={pendingWorkDir ? '' : undefined}>
       <button
         type="button"
         data-slot="workdir-pill-btn"
-        onClick={activeSessionId ? reveal : pick}
+        onClick={pick}
         aria-label={tip}
         title={tip}
       >
         <FolderIcon />
         <span data-slot="workdir-pill-label">{label}</span>
       </button>
-      {!activeSessionId && pendingWorkDir && (
+      {pendingWorkDir && (
         <button
           type="button"
           data-slot="workdir-pill-clear"

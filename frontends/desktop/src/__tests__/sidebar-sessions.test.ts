@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import {
-  applySessionTitle, displayTitle, filterSessions, formatAge, sortSessions,
+  applySessionTitle, displayTitle, filterSessions, formatAge, groupSessions, sortSessions,
 } from '../components/layout/sessionList';
 import { t } from '../i18n/t';
 import type { SessionInfo } from '../services/chat';
@@ -46,6 +46,45 @@ describe('sidebar session list', () => {
     const zh = (key: string) => t('zh', key);
     // The bridge titles from the first prompt but leaves `untitled: true` (= not user-named).
     expect(displayTitle({ title: '请只回复两个字：收到', untitled: true } as SessionInfo, zh)).toBe('请只回复两个字：收到');
+  });
+});
+
+describe('groupSessions', () => {
+  // 2026-09-02 15:30 local time; buckets follow the local calendar day, not 24 h windows.
+  const now = new Date(2026, 8, 2, 15, 30).getTime();
+  const at = (daysAgo: number, hour: number) => new Date(2026, 8, 2 - daysAgo, hour).getTime() / 1000;
+
+  it('buckets pinned first, then today / yesterday / last 7 days / older, keeping input order inside a bucket', () => {
+    const groups = groupSessions(sortSessions([
+      session('older', { updatedAt: at(7, 12) }),
+      session('week-edge', { updatedAt: at(6, 1) }),
+      session('yesterday-late', { updatedAt: at(1, 23) }),
+      session('today-early', { updatedAt: at(0, 0) }),
+      session('today-now', { updatedAt: at(0, 15) }),
+      session('pinned', { pinned: true, updatedAt: at(30, 9) }),
+      session('no-stamp'),
+    ]), now);
+    expect(groups.map((g) => [g.key, g.sessions.map((s) => s.id)])).toEqual([
+      ['pinned', ['pinned']],
+      ['today', ['today-now', 'today-early']],
+      ['yesterday', ['yesterday-late']],
+      ['week', ['week-edge']],
+      ['older', ['older', 'no-stamp']],
+    ]);
+  });
+
+  it('omits empty buckets so a single-bucket list needs no labels', () => {
+    const groups = groupSessions([session('a', { updatedAt: at(0, 9) }), session('b', { updatedAt: at(0, 8) })], now);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe('today');
+    expect(groupSessions([], now)).toEqual([]);
+  });
+
+  it('has a dictionary label for every bucket in both languages', () => {
+    for (const key of ['pinned', 'today', 'yesterday', 'week', 'older']) {
+      expect(t('zh', `conv.group.${key}`)).not.toBe(`conv.group.${key}`);
+      expect(t('en', `conv.group.${key}`)).not.toBe(`conv.group.${key}`);
+    }
   });
 });
 

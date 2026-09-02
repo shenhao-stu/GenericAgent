@@ -34,6 +34,7 @@ vi.mock('../services/ws', () => ({
     return () => mocks.wsHandlers.delete(type);
   },
   onBridgeStatusChange: vi.fn(),
+  getBridgeStatus: () => 'offline',
 }));
 
 vi.mock('../stores/settings', () => ({
@@ -218,8 +219,7 @@ describe('session-scoped chat runtime', () => {
     expect([...useChatStore.getState().runningSessions].sort()).toEqual(['A', 'B']);
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(mocks.pollMessages).toHaveBeenCalledWith('A');
-    expect(mocks.pollMessages).toHaveBeenCalledWith('B');
+    expect(mocks.pollMessages.mock.calls.map(([sessionId]) => sessionId).sort()).toEqual(['A', 'B']);
 
     pollB.resolve(result('B', 'idle'));
     await flushPromises();

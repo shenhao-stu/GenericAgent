@@ -13,7 +13,7 @@ import {
   type PollResult,
   type SessionInfo,
 } from '../services/chat';
-import { subscribe, onBridgeStatusChange } from '../services/ws';
+import { subscribe, onBridgeStatusChange, getBridgeStatus } from '../services/ws';
 import { applySessionTitle } from '../components/layout/sessionList';
 import { t } from '../i18n/t';
 import { useNotificationStore } from './notifications';
@@ -21,7 +21,17 @@ import { useSettingsStore } from './settings';
 import { useThreadViewStore } from './thread-view';
 
 export const PARTIAL_MSG_ID = '__partial__';
-const POLL_INTERVAL_MS = 1000;
+
+/**
+ * Live-update transport. The bridge websocket streams `partial-update` / `session-state`; HTTP polling is the
+ * fallback while that socket is down and otherwise only a slow safety net for a missed event.
+ */
+export const POLL_FALLBACK_MS = 1000;
+export const POLL_HEARTBEAT_MS = 5000;
+
+function pollIntervalMs(): number {
+  return getBridgeStatus() === 'ready' ? POLL_HEARTBEAT_MS : POLL_FALLBACK_MS;
+}
 
 type ChatStatus = 'idle' | 'running';
 type LiveModel = NonNullable<PollResult['model']>;
@@ -45,6 +55,8 @@ export interface SessionRuntimeState {
   sessionModelNo: number | null;
   model: LiveModel | null;
   loadGeneration: number;
+  /** True once a bridge fetch has been applied; until then an empty `messages` says nothing about the session. */
+  hydrated: boolean;
 }
 
 interface ChatState {
@@ -57,6 +69,7 @@ interface ChatState {
   pendingQueue: QueuedMessage[];
   turnStartedAt: number | null;
   sessionModelNo: number | null;
+  hydrated: boolean;
 
   sessions: SessionInfo[];
   runningSessions: Set<string>;
@@ -74,6 +87,8 @@ interface ChatState {
   renameSession: (id: string, title: string) => Promise<void>;
   pinSession: (id: string, pinned: boolean) => Promise<void>;
   selectSessionModel: (llmNo: number) => Promise<void>;
+  /** Bridge websocket came (back) up: events may have been missed, so re-derive every live session from HTTP. */
+  resyncFromBridge: () => void;
 }
 
 interface PartialFrameState {
@@ -83,6 +98,7 @@ interface PartialFrameState {
 
 const partialFrames = new Map<string, PartialFrameState>();
 const pollTimers = new Map<string, ReturnType<typeof setInterval>>();
+const lastPollAt = new Map<string, number>();
 
 function createRuntime(overrides: Partial<SessionRuntimeState> = {}): SessionRuntimeState {
   return {
@@ -94,6 +110,7 @@ function createRuntime(overrides: Partial<SessionRuntimeState> = {}): SessionRun
     sessionModelNo: null,
     model: null,
     loadGeneration: 0,
+    hydrated: false,
     ...overrides,
   };
 }
@@ -107,6 +124,25 @@ function isPartialMessage(message: Message): boolean {
   return String(message.id) === PARTIAL_MSG_ID || String(message.id).startsWith(`${PARTIAL_MSG_ID}:`);
 }
 
+function isLocalMessage(message: Message): boolean {
+  return String(message.id).startsWith('local-');
+}
+
+/**
+ * Cursor for an incremental fetch: the newest bridge message id already held. Bridge ids are the session's
+ * integer sequence; optimistic (`local-*`) and partial messages are not bridge messages and never qualify.
+ * `undefined` means nothing from the bridge is held yet, so the next fetch must be a full load.
+ */
+export function lastServerMessageId(messages: readonly Message[]): string | undefined {
+  let best: number | undefined;
+  for (const message of messages) {
+    if (isPartialMessage(message) || isLocalMessage(message)) continue;
+    const id = Number(message.id);
+    if (Number.isInteger(id) && (best === undefined || id > best)) best = id;
+  }
+  return best === undefined ? undefined : String(best);
+}
+
 export function mergeMessages(
   current: Message[],
   incoming: Message[],
@@ -114,8 +150,8 @@ export function mergeMessages(
   partialId: string = PARTIAL_MSG_ID,
 ): Message[] {
   const withoutPartial = current.filter((message) => !isPartialMessage(message));
-  const localMessages = withoutPartial.filter((message) => String(message.id).startsWith('local-'));
-  let merged = withoutPartial.filter((message) => !String(message.id).startsWith('local-'));
+  const localMessages = withoutPartial.filter(isLocalMessage);
+  let merged = withoutPartial.filter((message) => !isLocalMessage(message));
 
   for (const incomingMessage of incoming) {
     if (merged.some((message) => message.id === incomingMessage.id)) continue;
@@ -168,6 +204,8 @@ function activeProjection(runtime?: SessionRuntimeState) {
     pendingQueue: runtime?.pendingQueue ?? [],
     turnStartedAt: runtime?.turnStartedAt ?? null,
     sessionModelNo: runtime?.sessionModelNo ?? null,
+    // No session selected = the (hydrated) empty state; a selected session is only known once fetched.
+    hydrated: runtime ? runtime.hydrated : true,
   };
 }
 
@@ -256,6 +294,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     const timer = pollTimers.get(sessionId);
     if (timer != null) clearInterval(timer);
     pollTimers.delete(sessionId);
+    lastPollAt.delete(sessionId);
   }
 
   async function sendMessageToSession(sessionId: string, text: string, opts?: SendOptions) {
@@ -308,26 +347,40 @@ export const useChatStore = create<ChatState>((set, get) => {
     void sendMessageToSession(sessionId, next.text, next.opts);
   }
 
+  /**
+   * Streaming text has one source at a time: while the websocket is live and has already delivered a partial for
+   * this session, a poll's (possibly older) partial must not regress it. A finished turn always clears it.
+   */
+  function resolvePartial(runtime: SessionRuntimeState, result: PollResult): Message | null {
+    if (result.status !== 'running') return null;
+    if (runtime.partial && getBridgeStatus() === 'ready') return runtime.partial;
+    return result.partial ?? null;
+  }
+
   function applyPollResult(sessionId: string, generation: number, result: PollResult): boolean {
     if (!isCurrentLoad(sessionId, generation)) return false;
 
-    const applied = updateSession(sessionId, (runtime) => ({
-      ...runtime,
-      messages: mergeMessages(
-        runtime.messages,
-        result.messages,
-        result.partial,
-        partialMessageId(sessionId),
-      ),
-      partial: result.partial ?? null,
-      status: result.status,
-      turnStartedAt:
-        result.status === 'running'
-          ? runtime.turnStartedAt ?? inferTurnStart(result.messages)
-          : null,
-      sessionModelNo: result.model?.llmNo ?? runtime.sessionModelNo,
-      model: result.model ?? runtime.model,
-    }));
+    const applied = updateSession(sessionId, (runtime) => {
+      const partial = resolvePartial(runtime, result);
+      return {
+        ...runtime,
+        messages: mergeMessages(
+          runtime.messages,
+          result.messages,
+          partial ?? undefined,
+          partialMessageId(sessionId),
+        ),
+        partial,
+        status: result.status,
+        turnStartedAt:
+          result.status === 'running'
+            ? runtime.turnStartedAt ?? inferTurnStart(result.messages)
+            : null,
+        sessionModelNo: result.model?.llmNo ?? runtime.sessionModelNo,
+        model: result.model ?? runtime.model,
+        hydrated: true,
+      };
+    });
     if (!applied) return false;
 
     if (result.model) syncActiveModel(sessionId, result.model);
@@ -341,17 +394,25 @@ export const useChatStore = create<ChatState>((set, get) => {
     return true;
   }
 
+  /** Fetch the session from the bridge — incrementally once it holds bridge messages, in full otherwise. */
   async function requestPoll(sessionId: string) {
+    const runtime = get().sessionsById[sessionId];
+    const after = runtime ? lastServerMessageId(runtime.messages) : undefined;
     const generation = beginLoad(sessionId);
     if (generation == null) return;
+    lastPollAt.set(sessionId, Date.now());
     try {
-      const result = await pollMessages(sessionId);
+      const result = await pollMessages(sessionId, after);
       applyPollResult(sessionId, generation, result);
     } catch {
       // Polling is a fallback path. The next tick or websocket event can recover.
     }
   }
 
+  /**
+   * Keep a running session fresh over HTTP. The tick is fixed; whether a tick actually polls depends on the
+   * interval the current websocket state calls for, so the cadence follows the socket without re-arming timers.
+   */
   function startPolling(sessionId: string) {
     if (pollTimers.has(sessionId)) return;
     const timer = setInterval(() => {
@@ -360,8 +421,10 @@ export const useChatStore = create<ChatState>((set, get) => {
         stopPolling(sessionId);
         return;
       }
+      const last = lastPollAt.get(sessionId);
+      if (last != null && Date.now() - last < pollIntervalMs()) return;
       void requestPoll(sessionId);
-    }, POLL_INTERVAL_MS);
+    }, POLL_FALLBACK_MS);
     pollTimers.set(sessionId, timer);
   }
 
@@ -450,6 +513,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     pendingQueue: [],
     turnStartedAt: null,
     sessionModelNo: null,
+    hydrated: true,
     sessions: [],
     runningSessions: new Set(),
     pendingWorkDir: null,
@@ -480,7 +544,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           });
           return;
         }
-        const runtime = createRuntime({ sessionModelNo: pendingModel });
+        // Just created by us, so its (empty) history is known without a fetch.
+        const runtime = createRuntime({ sessionModelNo: pendingModel, hydrated: true });
         set((state) => ({
           activeSessionId: sessionId,
           pendingWorkDir: null,
@@ -624,6 +689,13 @@ export const useChatStore = create<ChatState>((set, get) => {
           : runtime);
       }
     },
+
+    resyncFromBridge() {
+      const { activeSessionId, sessionsById } = get();
+      const stale = new Set(Object.keys(sessionsById).filter((id) => sessionsById[id].status === 'running'));
+      if (activeSessionId && sessionsById[activeSessionId]) stale.add(activeSessionId);
+      for (const sessionId of stale) void requestPoll(sessionId);
+    },
   };
 });
 
@@ -641,6 +713,7 @@ export function __resetChatStoreForTests() {
     pendingQueue: [],
     turnStartedAt: null,
     sessionModelNo: null,
+    hydrated: true,
     sessions: [],
     runningSessions: new Set(),
     pendingWorkDir: null,
@@ -651,10 +724,13 @@ function stopTimerForTests(sessionId: string) {
   const timer = pollTimers.get(sessionId);
   if (timer != null) clearInterval(timer);
   pollTimers.delete(sessionId);
+  lastPollAt.delete(sessionId);
 }
 
 onBridgeStatusChange((status) => {
   if (status === 'ready') {
-    void useChatStore.getState().loadSessions();
+    const state = useChatStore.getState();
+    void state.loadSessions();
+    state.resyncFromBridge();
   }
 });

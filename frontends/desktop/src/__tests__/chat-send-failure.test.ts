@@ -24,6 +24,7 @@ vi.mock('../services/chat', () => ({
 vi.mock('../services/ws', () => ({
   subscribe: () => () => {},
   onBridgeStatusChange: vi.fn(),
+  getBridgeStatus: () => 'offline',
 }));
 
 vi.mock('../stores/settings', () => ({

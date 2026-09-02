@@ -171,7 +171,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
     if (readyImages.length > 0) {
       if (currentModelIsMixin()) {
         const pathLines = readyImages
-          .map((f) => f.path && f.path !== f.name ? `[图片: ${f.path}]` : null)
+          .map((f) => f.path && f.path !== f.name ? t('composer.imagePathRef', { path: f.path }) : null)
           .filter(Boolean)
           .join('\n');
         if (pathLines) outText = outText ? `${outText}\n\n${pathLines}` : pathLines;
@@ -183,7 +183,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
     editorRef.current?.clear();
     clearAttachments();
     setComposerDraft(viewSessionId, '');
-  }, [attachments, clearAttachments, editorRef, onSend, plainText, setComposerDraft, viewSessionId]);
+  }, [attachments, clearAttachments, editorRef, onSend, plainText, setComposerDraft, t, viewSessionId]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

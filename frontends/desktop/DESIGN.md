@@ -46,7 +46,18 @@ configuration. The bridge trusts the Vite dev origin only when the shell runs wi
   after decorations are final and persists on `CloseRequested` (Windows hides to tray, so `RunEvent::Exit` is
   not a reliable save point); restoring before `set_decorations(false)` grew the window by one caption per launch.
 - A session's sidebar title is the bridge title unless it is empty or the literal `New chat` placeholder;
-  `untitled` only records that the user never renamed it.
+  `untitled` only records that the user never renamed it. The thread header shows the same title (inline rename),
+  the bound folder and the live turn duration; the sidebar buckets sessions by recency (pinned / today / yesterday /
+  last 7 days / older, `groupSessions`) and labels the buckets only when there are several.
+- Live updates have one transport at a time (`stores/chat.ts`): the bridge websocket streams `partial-update` and
+  `session-state`; HTTP polling of `/session/{id}/messages` is the fallback while that socket is down (1 s) and
+  otherwise only a 5 s safety net. Polls are incremental (`after=<newest bridge id>`) once a session holds bridge
+  messages, the first load fetches up to 200, and a poll's `partial` never regresses a websocket partial while the
+  socket is live. A (re)connected socket re-fetches every running session and the active one.
+- A selected session is `hydrated` only after its first fetch; until then the renderer shows neither the welcome
+  screen nor a thread, so switching sessions never flashes the empty state.
+- The renderer reaches the bridge through one REST helper (`services/bridge.ts` `bridgeFetch`); the legacy
+  `window.ga` RPC surface belongs to the v1 `static/` UI only and is not consulted.
 
 ## Desktop runtime ownership
 

@@ -3,6 +3,7 @@ import { useChatStore, type SendOptions } from '../../stores/chat';
 import { useBridgeStatus } from '../../hooks/useBridgeStatus';
 import { useI18n } from '../../i18n';
 import { Thread } from './Thread';
+import { ThreadHeader } from './Thread/ThreadHeader';
 import { Composer } from './Composer';
 import { EmptyState } from './EmptyState';
 import type { SkillDef } from './Composer/skills';
@@ -14,6 +15,7 @@ export function ChatView() {
   const bridgeStatus = useBridgeStatus();
   const status = useChatStore((s) => s.status);
   const messages = useChatStore((s) => s.messages);
+  const hydrated = useChatStore((s) => s.hydrated);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const cancel = useChatStore((s) => s.cancel);
@@ -33,6 +35,8 @@ export function ChatView() {
 
   const isEmpty = messages.length === 0 && status === 'idle';
   const showOffline = isEmpty && bridgeStatus !== 'ready';
+  // A selected session whose first fetch is still in flight is not "empty" — it is unknown; don't flash the welcome.
+  const awaitingSession = isEmpty && !hydrated && bridgeStatus === 'ready';
 
   return (
     <div className="chat-view-root" data-empty={isEmpty || undefined}>
@@ -40,10 +44,18 @@ export function ChatView() {
         <div className="ga-chat-offline">
           <span>{bridgeStatus === 'connecting' ? t('bridge.connecting') : t('bridge.offline')}</span>
         </div>
+      ) : awaitingSession ? (
+        <div className="ga-chat-loading" aria-busy="true" />
       ) : isEmpty ? (
-        <EmptyState onPresetClick={handlePresetClick} />
+        <>
+          <ThreadHeader />
+          <EmptyState onPresetClick={handlePresetClick} />
+        </>
       ) : (
-        <Thread />
+        <>
+          <ThreadHeader />
+          <Thread />
+        </>
       )}
       <Composer
         sessionId={activeSessionId}

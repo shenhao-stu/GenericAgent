@@ -210,10 +210,17 @@ export async function sendPrompt(
   return (await bridgeJson(res)).userMessageId;
 }
 
+/** Messages a first load fetches; the bridge caps at this by default and the thread's render budget windows the rest. */
+export const FULL_LOAD_LIMIT = 200;
+
+/**
+ * Fetch a session's messages plus its live status/partial/model.
+ * `afterId` (a bridge message id) makes the fetch incremental: only messages newer than it come back.
+ */
 export async function pollMessages(
   sessionId: string,
   afterId?: string,
-  limit: number = 50,
+  limit: number = FULL_LOAD_LIMIT,
 ): Promise<PollResult> {
   if (useMock()) {
     await mockDelay(100);

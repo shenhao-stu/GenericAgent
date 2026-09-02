@@ -37,7 +37,7 @@ describe('model-selector session binding', () => {
     ];
     const sessionSelect = vi.fn();
     const conductorSelect = vi.fn();
-    useSettingsStore.setState({ modelProfiles: profiles, defaultModelNo: 0 });
+    useSettingsStore.setState({ modelProfiles: profiles, profilesLoaded: true, defaultModelNo: 0 });
     useChatStore.setState({ sessionModelNo: 0, selectSessionModel: sessionSelect });
 
     const ControlledSelector = selectorModule.ModelSelector as React.ComponentType<{
@@ -58,6 +58,23 @@ describe('model-selector session binding', () => {
     fireEvent.click(screen.getByTitle('model-a'));
     expect(conductorSelect).toHaveBeenCalledWith(0);
     expect(sessionSelect).not.toHaveBeenCalled();
+  });
+
+  it('spins until the first profile load, then becomes the add-model entry when nothing usable exists', () => {
+    const mixinOnly = [{ id: 0, name: '默认组', model: '', apibase: '', protocol: 'oai' as const, stream: true, kind: 'mixin' as const, members: [] }];
+    useSettingsStore.setState({ modelProfiles: [], profilesLoaded: false, visible: false, view: 'main', lang: 'en' });
+    const { container, rerender } = render(React.createElement(selectorModule.ModelSelector));
+    expect(container.querySelector('[data-slot="model-chip-spinner"]')).not.toBeNull();
+
+    useSettingsStore.setState({ modelProfiles: mixinOnly, profilesLoaded: true });
+    rerender(React.createElement(selectorModule.ModelSelector));
+    expect(container.querySelector('[data-slot="model-chip-spinner"]')).toBeNull();
+    const chip = container.querySelector('[data-slot="model-chip"][data-needs-model]') as HTMLButtonElement;
+    expect(chip.textContent).toBe('Add model');
+
+    fireEvent.click(chip);
+    expect(useSettingsStore.getState().visible).toBe(true);
+    expect(useSettingsStore.getState().view).toBe('addModel');
   });
 
   describe('selectedNo derivation', () => {

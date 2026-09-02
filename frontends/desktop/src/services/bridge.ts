@@ -25,28 +25,20 @@ export interface ModelProfile {
   inMixin?: boolean;
 }
 
-interface GaApi {
-  getConfig: () => Promise<{ config: AppConfig }>;
-  saveConfig: (cfg: { config: Partial<AppConfig> }) => Promise<void>;
-  getModelProfiles: () => Promise<{ profiles: ModelProfile[] }>;
-  rpc: (method: string, params: Record<string, unknown>) => Promise<unknown>;
-  getMykeyContent: () => Promise<{ content: string }>;
-  saveMykeyContent: (content: string) => Promise<void>;
-  tauriInvoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+export interface ModelProbeResult {
+  ok: boolean;
+  url?: string;
+  status?: number;
+  latencyMs?: number;
+  error?: string;
 }
 
-// ── Tauri IPC — direct access to Rust commands ──
-function getTauriInvoke(): ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null {
-  return (window as any).__TAURI__?.core?.invoke || null;
-}
-
-// ── Dev-mode HTTP fallback ──
-// When window.ga is not available (browser dev server without Tauri shell),
-// call the backend REST API directly.
-const DEV_BACKEND = BRIDGE_BASE;
-
-async function devFetch(path: string, opts?: RequestInit): Promise<unknown> {
-  const res = await fetch(`${DEV_BACKEND}${path}`, {
+/**
+ * The renderer talks to the Python bridge over its REST API only (the websocket is events-only).
+ * A non-2xx reply becomes an Error carrying the bridge's `error`/`message` text, or the HTTP status.
+ */
+export async function bridgeFetch<T = unknown>(path: string, opts?: RequestInit): Promise<T> {
+  const res = await fetch(`${BRIDGE_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   });
@@ -56,197 +48,105 @@ async function devFetch(path: string, opts?: RequestInit): Promise<unknown> {
     try { const j = JSON.parse(body); msg = j.error || j.message || msg; } catch {}
     throw new Error(msg);
   }
-  return res.json();
+  return res.json() as Promise<T>;
 }
 
-function ga(): GaApi | null {
-  const w = window as unknown as { ga?: GaApi };
-  return w.ga || null;
-}
+const json = (body: unknown): RequestInit => ({ body: JSON.stringify(body) });
 
-function isBridgeAvailable(): boolean {
-  return !!ga();
+/** Boot-cache defaults used while the bridge is unreachable (mirrors the index.html boot script). */
+function cachedConfig(): AppConfig {
+  return {
+    lang: (localStorage.getItem('ga_lang') as 'zh' | 'en') || 'zh',
+    theme: 'light',
+    appearance: (localStorage.getItem('ga_appearance') as 'light' | 'dark') || 'light',
+    plain: false,
+    fontSize: parseInt(localStorage.getItem('ga_font_size') || '14', 10),
+    llmNo: 0,
+  };
 }
 
 export async function getConfig(): Promise<AppConfig> {
-  if (isBridgeAvailable()) {
-    try {
-      const res = await ga()!.getConfig();
-      return res.config;
-    } catch { /* fall through */ }
-  }
   try {
-    const res = await devFetch('/config') as { config: AppConfig };
-    return res.config;
+    return (await bridgeFetch<{ config: AppConfig }>('/config')).config;
   } catch {
-    return {
-      lang: (localStorage.getItem('ga_lang') as 'zh' | 'en') || 'zh',
-      theme: 'light',
-      appearance: (localStorage.getItem('ga_appearance') as 'light' | 'dark') || 'light',
-      plain: false,
-      fontSize: parseInt(localStorage.getItem('ga_font_size') || '14', 10),
-      llmNo: 0,
-    };
+    return cachedConfig();
   }
 }
 
 export async function saveConfig(config: Partial<AppConfig>): Promise<void> {
-  if (isBridgeAvailable()) {
-    try { await ga()!.saveConfig({ config }); return; } catch { /* fall through */ }
-  }
   try {
-    await devFetch('/config', { method: 'POST', body: JSON.stringify({ config }) });
-  } catch {}
+    await bridgeFetch('/config', { method: 'POST', ...json({ config }) });
+  } catch {
+    // Settings are also boot-cached in localStorage; the bridge copy catches up on the next save.
+  }
 }
 
 export async function getModelProfiles(): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    try {
-      const res = await ga()!.getModelProfiles();
-      return res.profiles || [];
-    } catch { /* fall through */ }
-  }
   try {
-    const res = await devFetch('/model-profiles') as { profiles: ModelProfile[] };
-    return res.profiles || [];
+    return (await bridgeFetch<{ profiles: ModelProfile[] }>('/model-profiles')).profiles || [];
   } catch {
     return [];
   }
 }
 
 export async function getModelProfileDetail(id: number): Promise<ModelProfile | null> {
-  if (isBridgeAvailable()) {
-    try {
-      const res = await ga()!.rpc('model-profiles/get', { id }) as { profile: ModelProfile };
-      return res.profile || null;
-    } catch { /* fall through */ }
-  }
   try {
-    const res = await devFetch(`/model-profiles/${id}`) as { profile: ModelProfile };
-    return res.profile || null;
+    return (await bridgeFetch<{ profile: ModelProfile }>(`/model-profiles/${id}`)).profile || null;
   } catch {
     return null;
   }
 }
 
+type ProfilesReply = { profiles: ModelProfile[] };
+
 export async function addModelProfile(data: Partial<ModelProfile>): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    const res = await ga()!.rpc('model-profiles/add', data) as { profiles: ModelProfile[] };
-    return res.profiles;
-  }
-  const res = await devFetch('/model-profiles', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }) as { profiles: ModelProfile[] };
-  return res.profiles;
+  return (await bridgeFetch<ProfilesReply>('/model-profiles', { method: 'POST', ...json(data) })).profiles;
 }
 
 export async function editModelProfile(id: number, data: Partial<ModelProfile>): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    const res = await ga()!.rpc('model-profiles/edit', { id, ...data }) as { profiles: ModelProfile[] };
-    return res.profiles;
-  }
-  const res = await devFetch(`/model-profiles/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(data),
-  }) as { profiles: ModelProfile[] };
-  return res.profiles;
-}
-
-export interface ModelProbeResult {
-  ok: boolean;
-  url?: string;
-  status?: number;
-  latencyMs?: number;
-  error?: string;
+  return (await bridgeFetch<ProfilesReply>(`/model-profiles/${id}`, { method: 'PUT', ...json(data) })).profiles;
 }
 
 /** One minimal round-trip against the provider described by `data`; nothing is persisted. */
-export async function probeModelProfile(data: Pick<ModelProfile, 'protocol' | 'apibase' | 'model'> & { apikey?: string }): Promise<ModelProbeResult> {
-  return await devFetch('/model-profiles/test', { method: 'POST', body: JSON.stringify(data) }) as ModelProbeResult;
+export async function probeModelProfile(
+  data: Pick<ModelProfile, 'protocol' | 'apibase' | 'model'> & { apikey?: string },
+): Promise<ModelProbeResult> {
+  return bridgeFetch<ModelProbeResult>('/model-profiles/test', { method: 'POST', ...json(data) });
 }
 
 export async function deleteModelProfile(id: number): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    const res = await ga()!.rpc('model-profiles/delete', { id }) as { profiles: ModelProfile[] };
-    return res.profiles;
-  }
-  const res = await devFetch(`/model-profiles/${id}`, {
-    method: 'DELETE',
-  }) as { profiles: ModelProfile[] };
-  return res.profiles;
+  return (await bridgeFetch<ProfilesReply>(`/model-profiles/${id}`, { method: 'DELETE' })).profiles;
 }
 
 export async function addToMixin(id: number): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    const res = await ga()!.rpc('model-profiles/mixin-add', { id }) as { profiles: ModelProfile[] };
-    return res.profiles;
-  }
-  const res = await devFetch(`/model-profiles/${id}/mixin`, {
-    method: 'POST',
-    body: '{}',
-  }) as { profiles: ModelProfile[] };
-  return res.profiles;
+  return (await bridgeFetch<ProfilesReply>(`/model-profiles/${id}/mixin`, { method: 'POST', body: '{}' })).profiles;
 }
 
 export async function removeFromMixin(id: number): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    const res = await ga()!.rpc('model-profiles/mixin-remove', { id }) as { profiles: ModelProfile[] };
-    return res.profiles;
-  }
-  const res = await devFetch(`/model-profiles/${id}/mixin`, {
-    method: 'DELETE',
-  }) as { profiles: ModelProfile[] };
-  return res.profiles;
+  return (await bridgeFetch<ProfilesReply>(`/model-profiles/${id}/mixin`, { method: 'DELETE' })).profiles;
 }
 
 export async function reorderMixin(members: string[]): Promise<ModelProfile[]> {
-  if (isBridgeAvailable()) {
-    const res = await ga()!.rpc('model-profiles/mixin-reorder', { members }) as { profiles: ModelProfile[] };
-    return res.profiles;
-  }
-  const res = await devFetch('/model-profiles/mixin/order', {
-    method: 'PUT',
-    body: JSON.stringify({ members }),
-  }) as { profiles: ModelProfile[] };
-  return res.profiles;
+  return (await bridgeFetch<ProfilesReply>('/model-profiles/mixin/order', { method: 'PUT', ...json({ members }) })).profiles;
 }
 
 export async function getMykeyContent(): Promise<string> {
-  if (isBridgeAvailable()) {
-    try {
-      const res = await ga()!.getMykeyContent();
-      return res.content;
-    } catch { /* fall through */ }
-  }
   try {
-    const res = await devFetch('/services/mykey') as { content: string };
-    return res.content || '';
+    return (await bridgeFetch<{ content: string }>('/services/mykey')).content || '';
   } catch {
     return '';
   }
 }
 
 export async function saveMykeyContent(content: string): Promise<void> {
-  if (isBridgeAvailable()) {
-    await ga()!.saveMykeyContent(content);
-    return;
-  }
-  await devFetch('/services/mykey', {
-    method: 'POST',
-    body: JSON.stringify({ content }),
-  });
+  await bridgeFetch('/services/mykey', { method: 'POST', ...json({ content }) });
 }
 
+/** Direct Tauri IPC to the Rust shell; only exists inside the packaged window. */
 export async function tauriInvoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
-  // Prefer window.ga.tauriInvoke if the vanilla bridge script is loaded
-  if (isBridgeAvailable()) {
-    return ga()!.tauriInvoke(cmd, args);
-  }
-  // Direct Tauri IPC — works in packaged app without app.js
-  const invoke = getTauriInvoke();
-  if (invoke) {
-    return invoke(cmd, args);
-  }
-  throw new Error('Tauri IPC not available');
+  const invoke = (window as any).__TAURI__?.core?.invoke as
+    | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
+    | undefined;
+  if (!invoke) throw new Error('Tauri IPC not available');
+  return invoke(cmd, args);
 }
