@@ -56,6 +56,13 @@ configuration. The bridge trusts the Vite dev origin only when the shell runs wi
   socket is live. A (re)connected socket re-fetches every running session and the active one.
 - A selected session is `hydrated` only after its first fetch; until then the renderer shows neither the welcome
   screen nor a thread, so switching sessions never flashes the empty state.
+- A finished turn the user is not looking at never goes unnoticed (`stores/chat.ts` `onTurnEnded`): the session is
+  marked unread in the sidebar until opened; if the window is unattended (hidden to tray, minimized, background) the
+  shell's user-attention request fires (`core:window:allow-request-user-attention`); a turn in another session adds
+  an in-app notice that opens it. Coming back to the window clears the active session's mark. Opening a running
+  session always follows its live tail (#683).
+- Collapsing the sidebar never hides the app: an icon rail keeps new chat (with an unread dot), the pages, settings and
+  runtime management reachable; the collapsed state is boot-cached (`ga_sidebar_collapsed`) like the other preferences.
 - The renderer reaches the bridge through one JSON transport (`services/http.ts`: `requestJson` rejects non-2xx or
   `{ok:false}` with a `BridgeError` carrying the bridge's `error`, status and payload; `fetchJson` for endpoints whose
   200 body is itself a verdict, e.g. the model probe). The legacy `window.ga` RPC surface belongs to the v1 `static/`

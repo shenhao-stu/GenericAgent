@@ -2,21 +2,16 @@ import { useCallback, useState } from 'react';
 import { Input, Tooltip } from '@douyinfe/semi-ui';
 import { IconSearchStroked } from '@douyinfe/semi-icons';
 import { Codicon } from '../../lib/icons';
-import { useAppStore, type PageId } from '../../stores/app';
+import { useAppStore } from '../../stores/app';
 import { useSettingsStore } from '../../stores/settings';
 import { useChatStore } from '../../stores/chat';
 import { useI18n } from '../../i18n';
 import { shortcutFor } from '../../hooks/useGlobalShortcuts';
 import { filterSessions, groupSessions, sortSessions } from './sessionList';
+import { NAV_ITEMS } from './navItems';
 import { SessionSectionHeader } from './SessionSectionHeader';
 import { SessionRow } from './SessionRow';
 import { BridgeMenuPanel } from './BridgeMenuPanel';
-
-const NAV_ITEMS: { key: PageId; icon: string; textKey: string }[] = [
-  { key: 'services', icon: 'symbol-misc', textKey: 'nav.services' },
-  { key: 'collab', icon: 'robot', textKey: 'nav.collab' },
-  { key: 'token', icon: 'graph', textKey: 'nav.token' },
-];
 
 export function LeftSidebar() {
   const { activePage, setPage } = useAppStore();
@@ -26,6 +21,7 @@ export function LeftSidebar() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setActiveSession = useChatStore((s) => s.setActiveSession);
   const runningSessions = useChatStore((s) => s.runningSessions);
+  const unreadSessions = useChatStore((s) => s.unreadSessions);
   const { t } = useI18n();
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -131,6 +127,7 @@ export function LeftSidebar() {
                       session={s}
                       isActive={s.id === activeSessionId}
                       isWorking={runningSessions.has(s.id)}
+                      isUnread={unreadSessions.has(s.id)}
                       onClick={() => handleSelectSession(s.id)}
                     />
                   ))}

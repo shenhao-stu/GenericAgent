@@ -79,8 +79,71 @@
 .ga-body-collapsed {
   height: 100%;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   background: var(--background);
+}
+
+.ga-body-collapsed > .ga-main-area {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Collapsed sidebar: an icon rail keeps every destination reachable. */
+.ga-collapsed-rail {
+  flex-shrink: 0;
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--ga-sidebar-top-padding, 36px) 0 6px;
+  border-right: 1px solid var(--semi-color-border);
+  background: var(--ui-sidebar-surface-background);
+}
+
+.ga-rail-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--ui-icon-nav);
+  cursor: pointer;
+  padding: 0;
+}
+
+.ga-rail-btn:hover {
+  background: var(--ui-control-hover-background);
+  color: var(--ui-icon-nav-active);
+}
+
+.ga-rail-btn.active {
+  background: var(--ui-control-active-background);
+  border-color: var(--ui-stroke-tertiary);
+  color: var(--ui-icon-nav-active);
+}
+
+.ga-rail-btn:focus-visible {
+  outline: 2px solid var(--semi-color-primary-light-active);
+  outline-offset: 1px;
+}
+
+.ga-rail-spacer {
+  flex: 1;
+}
+
+.ga-rail-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-accent);
 }
 
 /* Sidebar */
@@ -327,6 +390,18 @@
 
 @keyframes ga-ping {
   75%, 100% { transform: scale(2); opacity: 0; }
+}
+
+/* Finished while the user looked elsewhere: steady accent dot + emphasized title until opened. */
+.ga-status-dot.unread {
+  width: 6px;
+  height: 6px;
+  background: var(--ui-accent);
+}
+
+.ga-session-item.unread .ga-session-title {
+  color: var(--foreground);
+  font-weight: 600;
 }
 
 .ga-session-title {

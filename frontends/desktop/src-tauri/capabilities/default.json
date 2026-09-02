@@ -9,6 +9,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
+    "core:window:allow-request-user-attention",
     "allow-start-bridge",
     "allow-retry-bootstrap",
     "allow-get-bootstrap-snapshot",

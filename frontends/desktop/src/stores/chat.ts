@@ -15,8 +15,10 @@ import {
 } from '../services/chat';
 import { errorText } from '../services/http';
 import { subscribe, onBridgeStatusChange, getBridgeStatus } from '../services/ws';
-import { applySessionTitle } from '../components/layout/sessionList';
+import { onWindowAttended, requestUserAttention, windowIsAttended } from '../services/attention';
+import { applySessionTitle, displayTitle } from '../components/layout/sessionList';
 import { t } from '../i18n/t';
+import { useAppStore } from './app';
 import { useNotificationStore } from './notifications';
 import { useSettingsStore } from './settings';
 import { useThreadViewStore } from './thread-view';
@@ -74,6 +76,8 @@ interface ChatState {
 
   sessions: SessionInfo[];
   runningSessions: Set<string>;
+  /** Sessions whose turn finished while the user was not looking at them (another session, or the window unattended). */
+  unreadSessions: Set<string>;
   /** Folder the next new session will be bound to (#780); cleared once that session exists. */
   pendingWorkDir: string | null;
 
@@ -83,6 +87,7 @@ interface ChatState {
   cancel: () => Promise<void>;
   cancelQueued: (index: number) => void;
   setActiveSession: (id: string | null) => void;
+  markSessionRead: (id: string) => void;
   loadSessions: () => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
@@ -227,12 +232,14 @@ export const useChatStore = create<ChatState>((set, get) => {
     updater: (runtime: SessionRuntimeState) => SessionRuntimeState,
   ): boolean {
     let updated = false;
+    let turnEnded = false;
     set((state) => {
       const current = state.sessionsById[sessionId];
       if (!current) return {};
       const next = updater(current);
       if (next === current) return {};
       updated = true;
+      turnEnded = current.status === 'running' && next.status !== 'running';
 
       const runningSessions = new Set(state.runningSessions);
       if (next.status === 'running') runningSessions.add(sessionId);
@@ -244,7 +251,38 @@ export const useChatStore = create<ChatState>((set, get) => {
         ...(state.activeSessionId === sessionId ? activeProjection(next) : {}),
       };
     });
+    if (turnEnded) onTurnEnded(sessionId);
     return updated;
+  }
+
+  /**
+   * A finished turn the user is not looking at must not go unnoticed: it is marked unread in the sidebar, an
+   * unattended window gets the platform's attention request, and a turn in another session gets an in-app notice.
+   */
+  function onTurnEnded(sessionId: string) {
+    const { activeSessionId, sessions } = get();
+    const attended = windowIsAttended();
+    const isActive = activeSessionId === sessionId;
+    if (isActive && attended) return;
+
+    set((state) => ({ unreadSessions: new Set(state.unreadSessions).add(sessionId) }));
+    if (!attended) requestUserAttention();
+    if (isActive) return;
+
+    const lang = useSettingsStore.getState().lang;
+    const tr = (key: string, params?: Record<string, string | number>) => t(lang, key, params);
+    const session = sessions.find((item) => item.id === sessionId);
+    useNotificationStore.getState().notify({
+      kind: 'info',
+      message: tr('notify.turnDone', { title: session ? displayTitle(session, tr) : tr('conv.defaultTitle') }),
+      action: {
+        label: tr('notify.openSession'),
+        onClick: () => {
+          get().setActiveSession(sessionId);
+          useAppStore.getState().setPage('chat');
+        },
+      },
+    });
   }
 
   function beginLoad(sessionId: string): number | null {
@@ -513,6 +551,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     hydrated: true,
     sessions: [],
     runningSessions: new Set(),
+    unreadSessions: new Set(),
     pendingWorkDir: null,
 
     async newSession() {
@@ -589,9 +628,23 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       const runtime = ensureSession(id);
       set({ activeSessionId: id, ...activeProjection(runtime) });
+      get().markSessionRead(id);
       syncActiveModel(id, runtime.model);
-      if (runtime.status === 'running') startPolling(id);
+      // A running session is opened for its live output: follow the tail wherever the user last left it (#683).
+      if (runtime.status === 'running' || get().runningSessions.has(id)) {
+        useThreadViewStore.getState().setScrollState(id, null, true);
+        startPolling(id);
+      }
       void requestPoll(id);
+    },
+
+    markSessionRead(id: string) {
+      set((state) => {
+        if (!state.unreadSessions.has(id)) return {};
+        const unreadSessions = new Set(state.unreadSessions);
+        unreadSessions.delete(id);
+        return { unreadSessions };
+      });
     },
 
     async loadSessions() {
@@ -618,11 +671,14 @@ export const useChatStore = create<ChatState>((set, get) => {
         delete sessionsById[id];
         const runningSessions = new Set(state.runningSessions);
         runningSessions.delete(id);
+        const unreadSessions = new Set(state.unreadSessions);
+        unreadSessions.delete(id);
         const deletingActive = state.activeSessionId === id;
         return {
           activeSessionId: deletingActive ? null : state.activeSessionId,
           sessionsById,
           runningSessions,
+          unreadSessions,
           sessions: state.sessions.filter((session) => session.id !== id),
           ...(deletingActive ? activeProjection() : {}),
         };
@@ -713,6 +769,7 @@ export function __resetChatStoreForTests() {
     hydrated: true,
     sessions: [],
     runningSessions: new Set(),
+    unreadSessions: new Set(),
     pendingWorkDir: null,
   });
 }
@@ -730,4 +787,10 @@ onBridgeStatusChange((status) => {
     void state.loadSessions();
     state.resyncFromBridge();
   }
+});
+
+// Coming back to the window means the active session has been seen.
+onWindowAttended(() => {
+  const { activeSessionId, markSessionRead } = useChatStore.getState();
+  if (activeSessionId) markSessionRead(activeSessionId);
 });

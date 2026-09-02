@@ -15,8 +15,9 @@
   transform: translateX(-50%);
 }
 
+/* Above the floating composer (which publishes its measured height), so a notice never covers the send button. */
 .ga-notification-stack--bottom {
-  bottom: 24px;
+  bottom: calc(var(--composer-measured-height, 5rem) + 1.5rem);
   right: 24px;
 }
 

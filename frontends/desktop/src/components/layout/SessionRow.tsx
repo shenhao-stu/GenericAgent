@@ -12,11 +12,14 @@ export function SessionRow({
   session,
   isActive,
   isWorking,
+  isUnread,
   onClick,
 }: {
   session: SessionInfo;
   isActive: boolean;
   isWorking?: boolean;
+  /** A turn finished here while the user was looking elsewhere; cleared when the session is opened. */
+  isUnread?: boolean;
   onClick: () => void;
 }) {
   const { t } = useI18n();
@@ -80,13 +83,17 @@ export function SessionRow({
 
   return (
     <div
-      className={`ga-session-item${isActive ? ' active' : ''}`}
+      className={`ga-session-item${isActive ? ' active' : ''}${isUnread ? ' unread' : ''}`}
       data-session-id={session.id}
+      data-unread={isUnread ? '' : undefined}
       onClick={renaming || menuOpen ? undefined : onClick}
       onContextMenu={(e) => { e.preventDefault(); if (!renaming) setMenuOpen(true); }}
     >
       <span className="ga-session-content">
-        <span className={`ga-status-dot${isWorking ? ' working' : ''}`} />
+        <span
+          className={`ga-status-dot${isWorking ? ' working' : isUnread ? ' unread' : ''}`}
+          title={isUnread && !isWorking ? t('conv.unread') : undefined}
+        />
         {renaming ? (
           <SessionRenameInput
             className="ga-session-rename-input"

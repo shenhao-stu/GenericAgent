@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { ResizeGroup, ResizeItem, ResizeHandler } from '@douyinfe/semi-ui';
 import { LeftSidebar } from './LeftSidebar';
+import { CollapsedRail } from './CollapsedRail';
 import { MainArea } from './MainArea';
 import { TitlebarControls } from './TitlebarControls';
 import { WindowsTitlebar } from './WindowsTitlebar';
@@ -39,6 +40,7 @@ export function AppLayout() {
       <div className="ga-app-body">
         {sidebarCollapsed ? (
           <div className="ga-body-collapsed">
+            <CollapsedRail />
             <MainArea />
           </div>
         ) : (
