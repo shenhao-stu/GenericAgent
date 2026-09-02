@@ -1,0 +1,139 @@
+/* ─── Thread header: session title · bound folder · live turn duration ─── */
+[data-slot="thread-header"] {
+  flex: 0 0 auto;
+  border-bottom: 1px solid color-mix(in srgb, var(--ui-stroke-secondary) 45%, transparent);
+  font-size: 0.8125rem;
+  color: var(--ui-text-secondary);
+}
+
+/* Same column as the thread content, so the title sits over the conversation rather than at the pane edge. */
+[data-slot="thread-header-inner"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  max-width: var(--composer-width);
+  width: 100%;
+  min-height: 2.5rem;
+  margin-inline: auto;
+  padding: 0.25rem 1.5rem;
+}
+
+[data-slot="thread-header-main"] {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+[data-slot="thread-header-title"] {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.125rem 0.375rem;
+  margin-left: -0.375rem;
+  border: none;
+  border-radius: 0.375rem;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  color: var(--foreground);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+
+[data-slot="thread-header-title"]:hover {
+  background: var(--ui-control-hover-background);
+}
+
+.thread-header-rename-input {
+  min-width: 0;
+  flex: 1;
+  max-width: 28rem;
+  padding: 0.125rem 0.375rem;
+  margin-left: -0.375rem;
+  border: 1px solid var(--ui-accent);
+  border-radius: 0.375rem;
+  background: var(--background);
+  font: inherit;
+  font-weight: 500;
+  color: var(--foreground);
+  outline: none;
+}
+
+[data-slot="thread-header-workdir"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  max-width: 14rem;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--ui-stroke-secondary);
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--ui-text-tertiary);
+  cursor: pointer;
+}
+
+[data-slot="thread-header-workdir"] span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot="thread-header-workdir"]:hover {
+  color: var(--foreground);
+  background: var(--ui-control-hover-background);
+}
+
+[data-slot="thread-header-live"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-accent);
+}
+
+[data-slot="thread-header-live-dot"] {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-accent);
+}
+
+[data-slot="thread-header-live-dot"]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--ui-accent);
+  animation: ga-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Non-empty chat: header row on top, the thread takes the rest; the composer keeps floating (composer.css). */
+.chat-view-root:not([data-empty]) {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-view-root:not([data-empty]) > [data-slot="thread-root"] {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+/* An existing but still empty session keeps its centered welcome layout; the header pins to the top edge. */
+.chat-view-root[data-empty] > [data-slot="thread-header"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}

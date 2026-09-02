@@ -481,6 +481,17 @@
   padding: 0 0.375rem;
 }
 
+/* No usable model yet: the chip is the call to action, not a picker. */
+[data-slot="model-chip"][data-needs-model] {
+  color: var(--semi-color-primary);
+  font-weight: 500;
+}
+
+[data-slot="model-chip"][data-needs-model]:hover {
+  background: color-mix(in srgb, var(--semi-color-primary) 10%, transparent);
+  color: var(--semi-color-primary);
+}
+
 [data-slot="model-chip-label"] {
   overflow: hidden;
   text-overflow: ellipsis;

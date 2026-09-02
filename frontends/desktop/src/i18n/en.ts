@@ -264,6 +264,7 @@ export const en: Record<string, string> = {
   'composer.attachImage': 'Image…',
   'composer.pasteImage': 'Paste image',
   'composer.attachHint': 'Tip: type @ to reference files inline',
+  'composer.imagePathRef': '[image: {path}]',
   'composer.presets': 'Prompt presets',
   'composer.presetsBuiltin': 'Presets',
   'composer.presetsCustom': 'Custom',

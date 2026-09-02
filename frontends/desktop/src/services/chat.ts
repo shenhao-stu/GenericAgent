@@ -118,7 +118,14 @@ export async function sendPrompt(
   return data.userMessageId;
 }
 
-export async function pollMessages(sessionId: string, afterId?: string, limit = 50): Promise<PollResult> {
+/** Messages a first load fetches; the bridge caps at this by default and the thread's render budget windows the rest. */
+export const FULL_LOAD_LIMIT = 200;
+
+/**
+ * Fetch a session's messages plus its live status/partial/model.
+ * `afterId` (a bridge message id) makes the fetch incremental: only messages newer than it come back.
+ */
+export async function pollMessages(sessionId: string, afterId?: string, limit = FULL_LOAD_LIMIT): Promise<PollResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (afterId) params.set('after', afterId);
   const data = await getJson(`/session/${sessionId}/messages?${params}`);

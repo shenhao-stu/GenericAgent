@@ -250,17 +250,17 @@
   gap: 1px;
 }
 
-/* Time buckets (置顶 / 今天 / 昨天 …): quiet labels, no interaction. */
+/* Recency buckets (pinned / today / yesterday / …): quiet labels, only shown when the list spans several. */
 .ga-session-group-label {
   padding: 8px 8px 2px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 500;
   letter-spacing: 0.02em;
-  color: var(--semi-color-text-3);
+  color: var(--ui-text-tertiary);
   user-select: none;
 }
 
-.ga-session-group-label:first-child {
+.ga-session-group:first-child .ga-session-group-label {
   padding-top: 2px;
 }
 

@@ -170,7 +170,7 @@ export function Composer({
     if (readyImages.length > 0) {
       if (imagesAsPaths) {
         const pathLines = readyImages
-          .map((f) => f.path && f.path !== f.name ? `[图片: ${f.path}]` : null)
+          .map((f) => f.path && f.path !== f.name ? t('composer.imagePathRef', { path: f.path }) : null)
           .filter(Boolean)
           .join('\n');
         if (pathLines) outText = outText ? `${outText}\n\n${pathLines}` : pathLines;
@@ -182,7 +182,7 @@ export function Composer({
     editorRef.current?.clear();
     clearAttachments();
     setComposerDraft(viewSessionId, '');
-  }, [attachments, clearAttachments, editorRef, imagesAsPaths, onSend, plainText, setComposerDraft, viewSessionId]);
+  }, [attachments, clearAttachments, editorRef, imagesAsPaths, onSend, plainText, setComposerDraft, t, viewSessionId]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

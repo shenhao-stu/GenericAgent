@@ -50,35 +50,37 @@ describe('sidebar session list', () => {
 });
 
 describe('groupSessions', () => {
-  // Local noon so day boundaries are unambiguous in any zone the test runs in.
-  const now = new Date(2026, 8, 2, 12, 0, 0).getTime();
-  const secondsAgo = (s: number) => (now - s * 1000) / 1000;
-  const DAY = 86400;
+  // 2026-09-02 15:30 local time; buckets follow the local calendar day, not 24 h windows.
+  const now = new Date(2026, 8, 2, 15, 30).getTime();
+  const at = (daysAgo: number, hour: number) => new Date(2026, 8, 2 - daysAgo, hour).getTime() / 1000;
 
-  it('buckets by local calendar age, pinned first, and drops empty buckets', () => {
-    const groups = groupSessions([
-      session('old', { updatedAt: secondsAgo(30 * DAY) }),
-      session('pinned', { pinned: true, updatedAt: secondsAgo(40 * DAY) }),
-      session('this-morning', { updatedAt: secondsAgo(3 * 3600) }),
-      session('yesterday', { updatedAt: secondsAgo(DAY) }),
-      session('three-days', { createdAt: secondsAgo(3 * DAY) }),
-      session('just-now', { updatedAt: secondsAgo(5) }),
-    ], now);
-    expect(groups.map((g) => [g.key, g.items.map((s) => s.id)])).toEqual([
+  it('buckets pinned first, then today / yesterday / last 7 days / older, keeping input order inside a bucket', () => {
+    const groups = groupSessions(sortSessions([
+      session('older', { updatedAt: at(7, 12) }),
+      session('week-edge', { updatedAt: at(6, 1) }),
+      session('yesterday-late', { updatedAt: at(1, 23) }),
+      session('today-early', { updatedAt: at(0, 0) }),
+      session('today-now', { updatedAt: at(0, 15) }),
+      session('pinned', { pinned: true, updatedAt: at(30, 9) }),
+      session('no-stamp'),
+    ]), now);
+    expect(groups.map((g) => [g.key, g.sessions.map((s) => s.id)])).toEqual([
       ['pinned', ['pinned']],
-      ['today', ['just-now', 'this-morning']],
-      ['yesterday', ['yesterday']],
-      ['week', ['three-days']],
-      ['older', ['old']],
+      ['today', ['today-now', 'today-early']],
+      ['yesterday', ['yesterday-late']],
+      ['week', ['week-edge']],
+      ['older', ['older', 'no-stamp']],
     ]);
   });
 
-  it('treats a session without any timestamp as older and never yields a bare label', () => {
-    expect(groupSessions([session('stampless')], now)).toEqual([{ key: 'older', items: [session('stampless')] }]);
+  it('omits empty buckets so a single-bucket list needs no labels', () => {
+    const groups = groupSessions([session('a', { updatedAt: at(0, 9) }), session('b', { updatedAt: at(0, 8) })], now);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe('today');
     expect(groupSessions([], now)).toEqual([]);
   });
 
-  it('has a localized label for every bucket it can produce', () => {
+  it('has a dictionary label for every bucket in both languages', () => {
     for (const key of ['pinned', 'today', 'yesterday', 'week', 'older']) {
       expect(t('zh', `conv.group.${key}`)).not.toBe(`conv.group.${key}`);
       expect(t('en', `conv.group.${key}`)).not.toBe(`conv.group.${key}`);

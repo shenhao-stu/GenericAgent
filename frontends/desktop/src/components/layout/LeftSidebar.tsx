@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Input, Tooltip } from '@douyinfe/semi-ui';
 import { IconSearchStroked } from '@douyinfe/semi-icons';
 import { Codicon } from '../../lib/icons';
@@ -44,11 +44,10 @@ export function LeftSidebar() {
     setRuntimePanelOpen((open) => !open);
   }, []);
 
-  // A search shows one flat ranked list; the browsing view buckets by activity so long histories stay scannable.
-  const groups = searchQuery
-    ? [{ key: 'search', items: filterSessions(sortSessions(sessions), searchQuery) }]
-    : groupSessions(sessions);
-  const isEmpty = groups.every((group) => group.items.length === 0);
+  const filtered = filterSessions(sortSessions(sessions), searchQuery);
+  // Search results stay flat (relevance is the query); browsing gets recency buckets, labelled only when there are several.
+  const groups = searchQuery ? [{ key: 'all' as const, sessions: filtered }] : groupSessions(filtered);
+  const showGroupLabels = groups.length > 1;
   const newSessionLabel = t('nav.chatShortcut', { shortcut: shortcutFor('n') });
 
   function handleNewSession() {
@@ -115,18 +114,18 @@ export function LeftSidebar() {
       )}
       <div className="ga-session-section">
         {(searchQuery || sessionsOpen) && (
-          isEmpty ? (
+          filtered.length === 0 ? (
             <div className="ga-session-empty">
               <p>{searchQuery ? t('search.noResults') : t('conv.emptyList')}</p>
             </div>
           ) : (
             <div className="ga-session-list">
               {groups.map((group) => (
-                <Fragment key={group.key}>
-                  {group.key !== 'search' && (
-                    <div className="ga-session-group-label" role="presentation">{t(`conv.group.${group.key}`)}</div>
+                <div key={group.key} className="ga-session-group" data-group={group.key}>
+                  {showGroupLabels && (
+                    <div className="ga-session-group-label">{t(`conv.group.${group.key}`)}</div>
                   )}
-                  {group.items.map((s) => (
+                  {group.sessions.map((s) => (
                     <SessionRow
                       key={s.id}
                       session={s}
@@ -135,7 +134,7 @@ export function LeftSidebar() {
                       onClick={() => handleSelectSession(s.id)}
                     />
                   ))}
-                </Fragment>
+                </div>
               ))}
             </div>
           )

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useSettingsStore } from '../../../stores/settings';
+import { hasUsableModel, useSettingsStore } from '../../../stores/settings';
 import { useChatStore } from '../../../stores/chat';
 import { useI18n } from '../../../i18n';
 import type { ModelProfile } from '../../../services/bridge';
@@ -144,6 +144,7 @@ export function ModelSelector({
   const { t } = useI18n();
 
   const profiles = useSettingsStore((s) => s.modelProfiles);
+  const profilesLoaded = useSettingsStore((s) => s.profilesLoaded);
   const defaultModelNo = useSettingsStore((s) => s.defaultModelNo);
   const liveModel = useSettingsStore((s) => s.liveModel);
   const sessionModelNo = useChatStore((s) => s.sessionModelNo);
@@ -155,7 +156,9 @@ export function ModelSelector({
     ? controlledRunningNo
     : liveModel?.runningLlmNo;
   const isRunning = controlledIsRunning ?? sessionStatus === 'running';
-  const isLoading = profiles.length === 0;
+  const isLoading = !profilesLoaded;
+  // Nothing to pick from yet (fresh install: only the empty aggregation group) — the chip is the way in.
+  const needsModel = profilesLoaded && !hasUsableModel(profiles);
   const currentProfile = profiles[selectedNo];
 
   const chipLabel = useMemo(() => {
@@ -256,6 +259,27 @@ export function ModelSelector({
     setOpen(false);
     useSettingsStore.getState().open('models');
   }, []);
+
+  const handleAddModel = useCallback(() => {
+    setOpen(false);
+    useSettingsStore.getState().open('addModel');
+  }, []);
+
+  if (needsModel) {
+    return (
+      <div ref={wrapRef} data-slot="model-selector">
+        <button
+          ref={btnRef}
+          data-slot="model-chip"
+          data-needs-model=""
+          onClick={handleAddModel}
+          title={t('onboarding.noModelBody')}
+        >
+          <span data-slot="model-chip-label">{isCompact ? '+' : t('onboarding.addModel')}</span>
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div ref={wrapRef} data-slot="model-selector">

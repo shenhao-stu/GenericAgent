@@ -2,17 +2,10 @@ import type { SessionInfo } from '../../services/chat';
 
 type TFn = (key: string, params?: Record<string, string | number>) => string;
 
-/** Bridge stamps are Unix seconds (or, defensively, ISO strings); the UI works in ms. */
-function stampMs(value: number | string | undefined): number {
-  if (!value) return 0;
-  return typeof value === 'number' ? value * 1000 : new Date(value).getTime();
-}
-
-const activityMs = (s: SessionInfo) => stampMs(s.updatedAt || s.createdAt);
-
 /** Pinned first, then most recently updated. */
 export function sortSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
-  return [...sessions].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || activityMs(b) - activityMs(a));
+  const stamp = (s: SessionInfo) => Number(s.updatedAt || s.createdAt || 0);
+  return [...sessions].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || stamp(b) - stamp(a));
 }
 
 export function filterSessions(sessions: readonly SessionInfo[], query: string): SessionInfo[] {
@@ -20,37 +13,46 @@ export function filterSessions(sessions: readonly SessionInfo[], query: string):
   return needle ? sessions.filter((s) => s.title.toLowerCase().includes(needle)) : [...sessions];
 }
 
+/** Bridge timestamps are Unix seconds (Python `time.time()`); ISO strings are accepted for older payloads. */
+function stampMs(dateVal: number | string | undefined): number | null {
+  if (!dateVal) return null;
+  const ts = typeof dateVal === 'number' ? dateVal * 1000 : new Date(dateVal).getTime();
+  return Number.isFinite(ts) ? ts : null;
+}
+
 export type SessionGroupKey = 'pinned' | 'today' | 'yesterday' | 'week' | 'older';
-export const SESSION_GROUP_ORDER: readonly SessionGroupKey[] = ['pinned', 'today', 'yesterday', 'week', 'older'];
 
-function localDayIndex(ms: number): number {
-  const d = new Date(ms);
-  return Math.floor((d.getTime() - d.getTimezoneOffset() * 60000) / 86400000);
+export interface SessionGroup {
+  key: SessionGroupKey;
+  sessions: SessionInfo[];
 }
 
-function groupKey(s: SessionInfo, todayIndex: number): SessionGroupKey {
-  if (s.pinned) return 'pinned';
-  const age = todayIndex - localDayIndex(activityMs(s));
-  if (age <= 0) return 'today';
-  if (age === 1) return 'yesterday';
-  return age < 7 ? 'week' : 'older';
-}
+const DAY_MS = 86_400_000;
 
-/** Sorted sessions bucketed by local calendar age; empty buckets are dropped so the sidebar never shows a bare label. */
-export function groupSessions(sessions: readonly SessionInfo[], now = Date.now()): { key: SessionGroupKey; items: SessionInfo[] }[] {
-  const todayIndex = localDayIndex(now);
-  const buckets = new Map<SessionGroupKey, SessionInfo[]>();
-  for (const s of sortSessions(sessions)) {
-    const key = groupKey(s, todayIndex);
-    buckets.set(key, [...(buckets.get(key) ?? []), s]);
-  }
-  return SESSION_GROUP_ORDER.flatMap((key) => (buckets.has(key) ? [{ key, items: buckets.get(key)! }] : []));
+/**
+ * Bucket an already-sorted list for display: pinned first, then by how many local calendar days ago the session
+ * was last touched. Order inside a bucket is preserved; empty buckets are omitted; unknown ages count as older.
+ */
+export function groupSessions(sessions: readonly SessionInfo[], now = Date.now()): SessionGroup[] {
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  const keyOf = (s: SessionInfo): SessionGroupKey => {
+    if (s.pinned) return 'pinned';
+    const ts = stampMs(s.updatedAt ?? s.createdAt);
+    if (ts == null || ts < startOfToday - 6 * DAY_MS) return 'older';
+    if (ts >= startOfToday) return 'today';
+    if (ts >= startOfToday - DAY_MS) return 'yesterday';
+    return 'week';
+  };
+  const order: SessionGroupKey[] = ['pinned', 'today', 'yesterday', 'week', 'older'];
+  const buckets = new Map<SessionGroupKey, SessionInfo[]>(order.map((key) => [key, []]));
+  for (const session of sessions) buckets.get(keyOf(session))!.push(session);
+  return order.filter((key) => buckets.get(key)!.length > 0).map((key) => ({ key, sessions: buckets.get(key)! }));
 }
 
 /** Relative age of a bridge timestamp (Unix seconds) or ISO string, localized. */
 export function formatAge(dateVal: number | string | undefined, t: TFn, now = Date.now()): string {
-  if (!dateVal) return '';
   const ts = stampMs(dateVal);
+  if (ts == null) return '';
   const minutes = Math.floor((now - ts) / 60000);
   if (minutes < 1) return t('conv.age.now');
   if (minutes < 60) return t('conv.age.min', { n: minutes });
