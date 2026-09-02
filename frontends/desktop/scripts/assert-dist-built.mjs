@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+/**
+ * assert-dist-built.mjs — Build artifact integrity check.
+ *
+ * Verifies that `vite build` produced a usable renderer payload.
+ * Inspired by Hermes Desktop's `scripts/assert-dist-built.test.cjs`.
+ *
+ * Usage:
+ *   node scripts/assert-dist-built.mjs [dist-dir]
+ *
+ * Exit codes:
+ *   0 = all checks pass
+ *   1 = one or more checks failed
+ */
+import fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  REMOVED_LEGACY_REACT_PUBLIC_ASSETS,
+  REQUIRED_REACT_PUBLIC_ASSET_SHA256,
+  REQUIRED_REACT_PUBLIC_ASSETS,
+} from './react-public-assets.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DESKTOP_ROOT = path.resolve(__dirname, '..');
+const DEFAULT_DIST = path.resolve(__dirname, '..', 'dist');
+const MAX_JS_CHUNK_SIZE = 500 * 1000;
+
+function sha256(filePath) {
+  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+/**
+ * @param {string} distDir
+ * @returns {{ ok: boolean, error?: string, warnings?: string[] }}
+ */
+export function checkDistBuilt(distDir) {
+  const warnings = [];
+
+  // React v2 public assets are an independent packaging boundary. The upstream static v1 tree is
+  // deliberately not read here; its zero-diff invariant is enforced against the PR base in CI.
+  for (const publicAsset of REQUIRED_REACT_PUBLIC_ASSETS) {
+    const sourcePath = path.join(DESKTOP_ROOT, 'public', publicAsset);
+    if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size === 0) {
+      return { ok: false, error: `public/${publicAsset} is missing or empty` };
+    }
+    const expectedHash = REQUIRED_REACT_PUBLIC_ASSET_SHA256[publicAsset];
+    if (expectedHash && sha256(sourcePath) !== expectedHash) {
+      return { ok: false, error: `public/${publicAsset} does not match its required SHA-256` };
+    }
+  }
+  for (const publicAsset of REMOVED_LEGACY_REACT_PUBLIC_ASSETS) {
+    if (fs.existsSync(path.join(DESKTOP_ROOT, 'public', publicAsset))) {
+      return { ok: false, error: `dead React v2 public asset was restored: public/${publicAsset}` };
+    }
+  }
+
+  // 1. dist/ exists
+  if (!fs.existsSync(distDir)) {
+    return { ok: false, error: `no dist directory at ${distDir}` };
+  }
+  for (const publicAsset of REQUIRED_REACT_PUBLIC_ASSETS) {
+    const builtPath = path.join(distDir, publicAsset);
+    if (!fs.existsSync(builtPath) || fs.statSync(builtPath).size === 0) {
+      return { ok: false, error: `${publicAsset} was not copied to dist/` };
+    }
+    const expectedHash = REQUIRED_REACT_PUBLIC_ASSET_SHA256[publicAsset];
+    if (expectedHash && sha256(builtPath) !== expectedHash) {
+      return { ok: false, error: `${publicAsset} in dist/ does not match its required SHA-256` };
+    }
+  }
+
+  // 2. index.html exists and non-empty
+  const indexPath = path.join(distDir, 'index.html');
+  if (!fs.existsSync(indexPath)) {
+    return { ok: false, error: 'index.html is missing from dist/' };
+  }
+  const indexContent = fs.readFileSync(indexPath, 'utf8');
+  if (indexContent.trim().length === 0) {
+    return { ok: false, error: 'index.html is empty' };
+  }
+
+  // 3. loading.html exists (Tauri cold-start splash)
+  const loadingPath = path.join(distDir, 'loading.html');
+  if (!fs.existsSync(loadingPath)) {
+    return { ok: false, error: 'loading.html is missing from dist/ (required for Tauri cold start)' };
+  }
+  const loadingContent = fs.readFileSync(loadingPath, 'utf8');
+  if (!loadingContent.includes('gaProgress') || !loadingContent.includes('__GA_LEGACY_PROGRESS__')) {
+    return { ok: false, error: 'loading.html is missing the upstream v1 progress compatibility bridge' };
+  }
+
+  const fallbackPath = path.join(distDir, 'fallback.html');
+  if (!fs.existsSync(fallbackPath)) {
+    return { ok: false, error: 'fallback.html is missing from dist/ (required for bootstrap recovery)' };
+  }
+  const fallbackContent = fs.readFileSync(fallbackPath, 'utf8');
+  for (const command of [
+    'get_bootstrap_snapshot',
+    'retry_bootstrap',
+    'get_prepare_error',
+    'start_bridge_with_config',
+  ]) {
+    if (!fallbackContent.includes(command)) {
+      return { ok: false, error: `fallback.html is missing the ${command} recovery contract` };
+    }
+  }
+  for (const publicAsset of REMOVED_LEGACY_REACT_PUBLIC_ASSETS) {
+    if (fs.existsSync(path.join(distDir, publicAsset))) {
+      return { ok: false, error: `dead React v2 public asset was copied to dist: ${publicAsset}` };
+    }
+  }
+
+  // 4. assets/ contains at least one JS bundle
+  const assetsDir = path.join(distDir, 'assets');
+  if (!fs.existsSync(assetsDir)) {
+    return { ok: false, error: 'assets/ directory is missing from dist/' };
+  }
+  const assetFiles = fs.readdirSync(assetsDir);
+  const jsFiles = assetFiles.filter((f) => f.endsWith('.js'));
+  if (jsFiles.length === 0) {
+    return { ok: false, error: 'no built JS bundle found in dist/assets/' };
+  }
+  for (const jsFile of jsFiles) {
+    const content = fs.readFileSync(path.join(assetsDir, jsFile), 'utf8');
+    if (content.includes('gaLegacy')) {
+      return { ok: false, error: `React bundle still depends on the Desktop v1 gaLegacy global (${jsFile})` };
+    }
+  }
+
+  // 5. Keep every production JavaScript chunk below Vite's default 500 kB budget.
+  // The complete Semi stylesheet remains a shared CSS asset; this budget deliberately targets
+  // JavaScript parse/evaluation cost and prevents the renderer from collapsing back into one entry.
+  for (const jsFile of jsFiles) {
+    const size = fs.statSync(path.join(assetsDir, jsFile)).size;
+    if (size > MAX_JS_CHUNK_SIZE) {
+      return {
+        ok: false,
+        error: `JavaScript chunk ${jsFile} is ${(size / 1000).toFixed(1)} kB (> 500 kB budget)`,
+      };
+    }
+  }
+
+  // 6. CSS files exist (app has styles)
+  const cssFiles = assetFiles.filter((f) => f.endsWith('.css'));
+  if (cssFiles.length === 0) {
+    warnings.push('no CSS files in dist/assets/ — UI may appear unstyled');
+  }
+
+  const result = { ok: true };
+  if (warnings.length > 0) result.warnings = warnings;
+  return result;
+}
+
+// CLI entrypoint
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  const distDir = process.argv[2] || DEFAULT_DIST;
+  console.log(`\n  Checking dist: ${distDir}\n`);
+
+  const result = checkDistBuilt(distDir);
+
+  if (!result.ok) {
+    console.error(`  ✗ FAIL: ${result.error}\n`);
+    process.exit(1);
+  }
+
+  if (result.warnings?.length) {
+    for (const w of result.warnings) {
+      console.warn(`  ⚠ WARNING: ${w}`);
+    }
+    console.log('');
+  }
+
+  const assetsDir = path.join(distDir, 'assets');
+  const assetFiles = fs.readdirSync(assetsDir);
+  const jsFiles = assetFiles.filter((f) => f.endsWith('.js'));
+  const cssFiles = assetFiles.filter((f) => f.endsWith('.css'));
+  const totalSize = assetFiles.reduce((sum, f) => sum + fs.statSync(path.join(assetsDir, f)).size, 0);
+
+  console.log(`  ✓ dist/index.html present`);
+  console.log(`  ✓ dist/loading.html present`);
+  console.log(`  ✓ dual-contract loading and recovery assets are present`);
+  console.log(`  ✓ third-party notices are present and hash-locked`);
+  console.log(`  ✓ dead legacy React v2 public assets and fonts are absent`);
+  console.log(`  ✓ React bundles contain no Desktop v1 gaLegacy dependency`);
+  console.log(`  ✓ ${jsFiles.length} JS bundle(s), ${cssFiles.length} CSS file(s)`);
+  console.log(`  ✓ Total assets size: ${(totalSize / 1024).toFixed(0)} KB`);
+  console.log(`\n  PASS\n`);
+  process.exit(0);
+}

@@ -12,6 +12,7 @@ HTTP API:
   GET    /config
   POST   /config
   GET    /model-profiles  (+ POST / PUT / DELETE by id)
+  POST   /model-profiles/test   body: {protocol, apibase, apikey, model} -> one minimal round-trip
   GET    /sessions
   POST   /session/new
   GET    /session/{sid}
@@ -242,6 +243,7 @@ class Session:
     partial: Optional[dict] = None
     status: str = "idle"  # idle|running|error|cancelled
     agent: Any = None
+    agent_thread: Optional[threading.Thread] = None  # agent.run() worker; dead == agent can never answer
     thread: Optional[threading.Thread] = None
     cancel_requested: bool = False
     active_turn_id: str = ""
@@ -713,7 +715,17 @@ class AgentManager:
         text = self._mykey_file().read_text(encoding="utf-8")
         var = self._next_native_var(text, data.get("protocol", ""))
         profiles = self._save_mykey_text(text.rstrip() + f"\n{var} = {self._format_py_dict(cfg)}\n")
-        return {"varName": var, "profileId": profiles[-1]["id"] if profiles else 0, "profiles": profiles}
+        profile_id = profiles[-1]["id"] if profiles else 0
+        # Invariant: the default group is never left empty while a model exists — otherwise
+        # new sessions resolve to an unusable BADMIXIN client and can never answer.
+        if self._default_group_is_empty():
+            profiles = self.add_to_mixin(profile_id)["profiles"]
+        return {"varName": var, "profileId": profile_id, "profiles": profiles}
+
+    def _default_group_is_empty(self) -> bool:
+        keys, mk = self._mykey_vars()
+        _, mcfg = self._mixin_entry(keys, mk)
+        return mcfg is not None and not (mcfg.get("llm_nos") or [])
 
     def get_model_profile(self, profile_id: int) -> dict:
         var, cfg = self._profile_at(profile_id)
@@ -777,11 +789,28 @@ class AgentManager:
             agent = GA()
             agent.inc_out = True
             agent.verbose = True
-            threading.Thread(target=agent.run, daemon=True, name=f"GA-{sess.id}").start()
+            if work_dir := self.session_work_dir(sess):
+                agent.work_dir = work_dir
+            sess.agent_thread = threading.Thread(target=agent.run, daemon=True, name=f"GA-{sess.id}")
+            sess.agent_thread.start()
             return agent
         finally:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
+
+    @staticmethod
+    def unusable_client_reason(agent) -> Optional[str]:
+        """Why the agent's selected LLM client cannot run a turn (None when it can).
+
+        agentmain keeps an unbuildable aggregation channel as a bare dict and GenericAgent.run()
+        then dies on `llmclient.backend` outside its own try/except, so the turn would hang forever.
+        The returned string is a stable `code: detail` the renderer maps to localized guidance."""
+        client = getattr(agent, "llmclient", None)
+        if client is None:
+            return "model_unavailable: no model configured"
+        if isinstance(client, dict) or not hasattr(client, "backend"):
+            return "model_unavailable: default group has no members"
+        return None
 
     @staticmethod
     def _base_display_name(var: str, cfg: Optional[dict]) -> str:
@@ -928,6 +957,7 @@ class AgentManager:
             "id": sess.id,
             "title": sess.title,
             "cwd": sess.cwd,
+            "workDir": self.session_work_dir(sess),
             "status": sess.status,
             "createdAt": sess.created_at,
             "updatedAt": sess.updated_at,
@@ -953,7 +983,16 @@ class AgentManager:
         self._persist_session(sess)
         return msg
 
+    def session_work_dir(self, sess: Session) -> Optional[str]:
+        """The folder a session was explicitly bound to; None keeps the agent's default (GA temp/)."""
+        cwd = (sess.cwd or "").strip()
+        if not cwd or not Path(cwd).is_dir():
+            return None
+        return None if Path(cwd).resolve() == Path(self.ga_root).resolve() else cwd
+
     def create_session(self, cwd: Optional[str] = None) -> Session:
+        if cwd and not Path(cwd).is_dir():
+            raise ValueError(f"working directory does not exist: {cwd}")
         sid = "sess-" + uuid.uuid4().hex[:12]
         sess = Session(id=sid, cwd=str(cwd or self.ga_root), llm_no=_global_default_llm_no())
         with self.mutation():
@@ -1106,7 +1145,8 @@ class AgentManager:
                     sess.last_error = ""
                 emit_session_state(sess, "idle")
                 return
-            if sess.agent is None:
+            worker_dead = sess.agent_thread is not None and not sess.agent_thread.is_alive()
+            if sess.agent is None or worker_dead:
                 sess.agent = self.make_agent(sess)
                 if sess.llm_history:
                     try:
@@ -1119,6 +1159,8 @@ class AgentManager:
             if no is not None and hasattr(agent, "next_llm"):
                 with contextlib.suppress(Exception):
                     agent.next_llm(int(no))
+            if reason := self.unusable_client_reason(agent):
+                raise RuntimeError(reason)
             with self.lock:
                 sess.running_llm_no = getattr(agent, "llm_no", no)
                 try:
@@ -1148,6 +1190,8 @@ class AgentManager:
                     try:
                         item = display_q.get(timeout=1.0)
                     except _queue.Empty:
+                        if sess.agent_thread is not None and not sess.agent_thread.is_alive():
+                            raise RuntimeError("agent_crashed: the agent worker exited without answering")
                         continue
                     if isinstance(item, dict):
                         if item.get("next"):
@@ -1546,6 +1590,7 @@ def _cpu_pct(pid: Optional[int]) -> Optional[float]:
 
 _ERROR_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"errno 48|address already in use", re.I), "transient", "err.portBusy"),
+    (re.compile(r"BAD Mixin config|MixinSession: no sessions selected|No LLM|no model", re.I), "fatal", "err.noUsableModel"),
     (re.compile(r"Exception in thread conductor", re.I), "fatal", "err.conductorCrash"),
     (re.compile(r"ModuleNotFoundError|ImportError", re.I), "fatal", "err.missingModule"),
     (re.compile(r"ConnectionRefusedError|Connection refused", re.I), "warning", "err.connRefused"),
@@ -1897,6 +1942,7 @@ def emit_session_state(sess: Session, state_name: str):
         "seq": sess.msg_seq,
         "updatedAt": sess.updated_at,
         "title": sess.title,
+        "untitled": sess.untitled,
     })
 
 
@@ -1943,16 +1989,30 @@ def _valid_port(value: str, default: int) -> int:
     return port if 1 <= port <= 65535 else default
 
 
+_DESKTOP_DEV_ORIGIN_ENV = "GA_DESKTOP_DEV_ORIGIN"
+_DESKTOP_DEV_ORIGIN_RE = re.compile(r"http://(?:localhost|127\.0\.0\.1):([0-9]{1,5})\Z")
+
+
+def _configured_desktop_dev_origin() -> Optional[str]:
+    """Vite dev-server origin, trusted only when the shell (`--dev`) exported it explicitly."""
+    origin = os.environ.get(_DESKTOP_DEV_ORIGIN_ENV, "")
+    match = _DESKTOP_DEV_ORIGIN_RE.fullmatch(origin)
+    if match is None or not 1 <= int(match.group(1)) <= 65535:
+        return None
+    return origin
+
+
 def _allowed_request_origins() -> Set[str]:
     bridge_port = _valid_port(os.environ.get("BRIDGE_PORT", "14168"), 14168)
     origins = {
         "tauri://localhost",
         "http://tauri.localhost",
-        "http://localhost:5173",
         f"http://127.0.0.1:{bridge_port}",
         f"http://localhost:{bridge_port}",
         f"http://[::1]:{bridge_port}",
     }
+    if dev_origin := _configured_desktop_dev_origin():
+        origins.add(dev_origin)
     if os.environ.get("GA_E2E") == "1":
         vite_port = os.environ.get("VITE_PORT", "")
         if re.fullmatch(r"[0-9]{1,5}", vite_port or ""):
@@ -2196,6 +2256,54 @@ async def model_profiles_handler(request):
         return json_ok({"ok": False, "error": str(e)}, status=500)
 
 
+_LLM_ERROR_RE = re.compile(r"^!!!Error: (?:HTTP (\d+))?:?\s*(.*)", re.S)
+
+
+def probe_model_config(cfg: dict, timeout: float = 20.0) -> dict:
+    """One minimal round-trip through the very llmcore session class a chat turn would use.
+
+    Relays gate on client identity (UA, Claude-Code headers, GA fingerprints), so the only honest answer to
+    "will a chat turn work?" is to send the runtime's own request: same class, same headers, same URL rules,
+    just `stream=False, max_tokens=1, max_retries=0`. Pure w.r.t. bridge state:
+    cfg -> {ok, latencyMs, status?, error?}. Nothing is written to mykey.py."""
+    import llmcore
+    model, base = (str(cfg.get(k) or "").strip() for k in ("model", "apibase"))
+    if not model or not base:
+        return {"ok": False, "error": "model and apibase are required"}
+    session_cls = llmcore.NativeClaudeSession if (cfg.get("protocol") or "oai") == "claude" else llmcore.NativeOAISession
+    probe_cfg = {**cfg, "model": model, "apibase": base, "apikey": str(cfg.get("apikey") or ""), "stream": False,
+                 "max_tokens": 1, "max_retries": 0, "timeout": timeout, "read_timeout": timeout}
+    started = time.time()
+    try:
+        chunks = list(session_cls(probe_cfg).raw_ask([{"role": "user", "content": "ping"}]))
+    except Exception as e:  # noqa: BLE001 - any client-side failure is the probe's answer, not a bridge fault
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    result = {"ok": True, "latencyMs": int((time.time() - started) * 1000)}
+    text = "".join(c for c in chunks if isinstance(c, str)).strip()
+    if failure := _LLM_ERROR_RE.match(text):
+        status, detail = failure.groups()
+        result["ok"] = False
+        if status:
+            result["status"] = int(status)
+        result["error"] = _provider_error_message(detail) or (f"HTTP {status}" if status else "request failed")
+    return result
+
+
+def _provider_error_message(body: str) -> str:
+    """Providers wrap errors as {"error": {"message": ...}} or {"error": "..."}; fall back to the raw body."""
+    body = (body or "").strip()
+    with contextlib.suppress(Exception):
+        err = json.loads(body).get("error")
+        body = err.get("message", body) if isinstance(err, dict) else str(err or body)
+    return body[:300]
+
+
+async def model_probe_handler(request):
+    data = await read_json(request)
+    manager.ensure_ga_import_path()
+    return json_ok(await asyncio.to_thread(probe_model_config, data))
+
+
 async def mixin_handler(request):
     """聚合渠道成员管理：POST 加入 / DELETE 移出 主聚合渠道。"""
     try:
@@ -2237,7 +2345,10 @@ async def list_sessions_handler(request):
 
 async def new_session_handler(request):
     data = await read_json(request)
-    sess = manager.create_session(cwd=data.get("cwd") or data.get("path"))
+    try:
+        sess = manager.create_session(cwd=data.get("cwd") or data.get("path"))
+    except ValueError as error:
+        return json_ok({"ok": False, "code": "invalid_cwd", "error": str(error)}, status=400)
     return json_ok({"ok": True, "sessionId": sess.id, "session": manager.snapshot(sess)}, status=201)
 
 
@@ -2411,6 +2522,48 @@ def _sweep_stale_uploads(retention_days: int = UPLOAD_RETENTION_DAYS) -> None:
 _sweep_stale_uploads()
 
 
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_MAX_UPLOAD_BASE64_BYTES = 4 * ((MAX_UPLOAD_BYTES + 2) // 3)
+_MAX_UPLOAD_REQUEST_BYTES = _MAX_UPLOAD_BASE64_BYTES + 64 * 1024
+
+
+class _UploadTooLarge(ValueError):
+    pass
+
+
+async def _read_bounded_upload_json(request, max_body_bytes: int) -> dict:
+    """Read the upload body without buffering more than the declared limit."""
+    if request.content_length is not None and request.content_length > max_body_bytes:
+        raise _UploadTooLarge
+    body = bytearray()
+    async for chunk in request.content.iter_chunked(64 * 1024):
+        if len(body) + len(chunk) > max_body_bytes:
+            raise _UploadTooLarge
+        body.extend(chunk)
+    data = json.loads(body)
+    return data if isinstance(data, dict) else {}
+
+
+def _decode_upload_data(data_url: str, max_bytes: int) -> bytes:
+    if not isinstance(data_url, str):
+        raise ValueError("upload data must be a string")
+    encoded = data_url.split(",", 1)[1] if "," in data_url else data_url
+    try:
+        encoded_bytes = encoded.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise ValueError("upload data must be base64") from error
+    if len(encoded_bytes) > 4 * ((max_bytes + 2) // 3):
+        raise _UploadTooLarge
+    blob = base64.b64decode(encoded_bytes, validate=True)
+    if len(blob) > max_bytes:
+        raise _UploadTooLarge
+    return blob
+
+
+def _upload_too_large_response():
+    return json_ok({"ok": False, "code": "file_too_large", "error": "file exceeds 50 MB limit"}, status=413)
+
+
 async def upload_handler(request):
     """Save a file uploaded by the web client and return its absolute path.
     Body: {name: "<original filename>", dataUrl: "data:<mime>;base64,<...>", sid: "<session id>"}
@@ -2419,21 +2572,16 @@ async def upload_handler(request):
     Returns: {ok: true, path: "<abs path>"}
     """
     try:
-        data = await request.json()
-        if not isinstance(data, dict):
-            data = {}
-    except web.HTTPRequestEntityTooLarge:
-        return json_ok({"ok": False, "error": "file too large for bridge body limit"})
+        data = await _read_bounded_upload_json(request, _MAX_UPLOAD_REQUEST_BYTES)
+    except (_UploadTooLarge, web.HTTPRequestEntityTooLarge):
+        return _upload_too_large_response()
     except Exception as e:
         return json_ok({"ok": False, "error": f"invalid request: {e}"})
     name = (data.get("name") or "file").strip().replace("/", "_").replace("\\", "_")
-    data_url = data.get("dataUrl") or ""
-    if "," in data_url:
-        b64 = data_url.split(",", 1)[1]
-    else:
-        b64 = data_url
     try:
-        blob = base64.b64decode(b64)
+        blob = _decode_upload_data(data.get("dataUrl") or "", MAX_UPLOAD_BYTES)
+    except _UploadTooLarge:
+        return _upload_too_large_response()
     except Exception as e:
         return json_ok({"ok": False, "error": f"decode failed: {e}"})
     if not blob:
@@ -2927,6 +3075,7 @@ def create_app():
     app.router.add_post("/config", save_config_handler)
     app.router.add_get("/model-profiles", model_profiles_handler)
     app.router.add_post("/model-profiles", model_profiles_handler)
+    app.router.add_post("/model-profiles/test", model_probe_handler)
     app.router.add_put("/model-profiles/mixin/order", mixin_order_handler)
     app.router.add_post("/model-profiles/{id}/mixin", mixin_handler)
     app.router.add_delete("/model-profiles/{id}/mixin", mixin_handler)

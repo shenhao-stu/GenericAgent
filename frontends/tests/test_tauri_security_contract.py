@@ -44,7 +44,7 @@ def test_production_csp_is_local_and_keeps_required_tauri_ipc_and_services():
 
 def test_global_tauri_remains_only_because_compiled_compatibility_page_uses_it():
     config = _json(TAURI_ROOT / "tauri.conf.json")
-    fallback = (ROOT / "frontends" / "desktop" / "dist" / "fallback.html").read_text(
+    fallback = (ROOT / "frontends" / "desktop" / "public" / "fallback.html").read_text(
         encoding="utf-8"
     )
 

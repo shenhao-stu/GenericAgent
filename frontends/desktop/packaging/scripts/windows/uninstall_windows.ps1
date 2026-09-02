@@ -126,14 +126,16 @@ if ((Test-Path -LiteralPath $settings -PathType Leaf) -and
 # outside the bundle, keyed by the app identifier. Only the Tauri desktop shell uses it (the
 # project's other frontends — qt/tui/conductor — do not), so removing it is safe. Other
 # GenericAgent bundles share the same identifier and would just rebuild it on next launch.
-Write-Step "Removing WebView2 data"
-$wv = Join-Path $env:LOCALAPPDATA 'com.genericagent.app'
-if (Test-Path -LiteralPath $wv) {
-    Remove-Item -LiteralPath $wv -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $wv) { Write-Info "WebView2 data partially locked; some files remain" }
-    else { Write-Ok "removed $wv" }
-} else {
-    Write-Info "no WebView2 data found"
+Write-Step "Removing WebView2 data and window state"
+# %APPDATA%\com.genericagent.app\ holds the remembered window geometry (tauri-plugin-window-state).
+foreach ($dir in @((Join-Path $env:LOCALAPPDATA 'com.genericagent.app'), (Join-Path $env:APPDATA 'com.genericagent.app'))) {
+    if (Test-Path -LiteralPath $dir) {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $dir) { Write-Info "$dir partially locked; some files remain" }
+        else { Write-Ok "removed $dir" }
+    } else {
+        Write-Info "nothing to remove at $dir"
+    }
 }
 
 # ── 4. Schedule deletion of the bundle folder ────────────────────────────────

@@ -21,6 +21,55 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 static BRIDGE_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static BRIDGE_LOG_READERS: Mutex<Vec<thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
+const DESKTOP_DEV_ORIGIN_ENV: &str = "GA_DESKTOP_DEV_ORIGIN";
+const DESKTOP_VITE_ORIGIN: &str = "http://localhost:5173";
+
+fn desktop_dev_mode() -> bool {
+    std::env::args().any(|argument| argument == "--dev")
+}
+
+/// The bridge only trusts the Vite dev origin when this shell explicitly runs in `--dev` mode.
+fn configure_bridge_dev_origin(command: &mut Command, dev_mode: bool) {
+    command.env_remove(DESKTOP_DEV_ORIGIN_ENV);
+    if dev_mode {
+        command.env(DESKTOP_DEV_ORIGIN_ENV, DESKTOP_VITE_ORIGIN);
+    }
+}
+
+/// Remembered main-window geometry (size / position / maximized). Visibility stays shell-owned:
+/// the window is created hidden and shown once the bridge is ready.
+const WINDOW_STATE_FLAGS: tauri_plugin_window_state::StateFlags =
+    tauri_plugin_window_state::StateFlags::SIZE
+        .union(tauri_plugin_window_state::StateFlags::POSITION)
+        .union(tauri_plugin_window_state::StateFlags::MAXIMIZED);
+
+/// `main` is restored explicitly in `setup` (see `restore_window_state`) instead of on window-ready:
+/// on Windows the shell strips decorations after creation, and a size restored against the decorated
+/// frame would gain one caption height per launch.
+fn window_state_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri_plugin_window_state::Builder::default()
+        .with_state_flags(WINDOW_STATE_FLAGS)
+        .with_denylist(&["setup"])
+        .skip_initial_state("main")
+        .build()
+}
+
+/// Apply the remembered geometry once the window frame is final (decorations settled).
+fn restore_window_state<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use tauri_plugin_window_state::WindowExt;
+    if let Err(err) = window.restore_state(WINDOW_STATE_FLAGS) {
+        eprintln!("[window-state] restore failed: {err}");
+    }
+}
+
+/// The plugin only writes on `RunEvent::Exit`; on Windows the X button hides to tray and a later
+/// shutdown/kill never reaches Exit, so persist at the moment the user perceives as "closing".
+fn persist_window_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri_plugin_window_state::AppHandleExt;
+    if let Err(err) = app.save_window_state(WINDOW_STATE_FLAGS) {
+        eprintln!("[window-state] save failed: {err}");
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct BridgeEndpoint {
@@ -1994,7 +2043,11 @@ fn resolve_existing_listener(
     }
 }
 
-fn bridge_command(python_path: &str, project_dir: &str) -> Result<Command, BootstrapFailure> {
+fn bridge_command(
+    python_path: &str,
+    project_dir: &str,
+    dev_mode: bool,
+) -> Result<Command, BootstrapFailure> {
     if python_path.trim().is_empty() {
         return Err(bootstrap_failure(
             BootstrapFailureCode::SpawnFailed,
@@ -2014,6 +2067,7 @@ fn bridge_command(python_path: &str, project_dir: &str) -> Result<Command, Boots
     cmd.arg(&script).current_dir(&dir);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     sanitize_bundle_env(&mut cmd, project_dir);
+    configure_bridge_dev_origin(&mut cmd, dev_mode);
     Ok(cmd)
 }
 
@@ -2040,6 +2094,7 @@ fn spawn_bridge_process(
     app_handle: &tauri::AppHandle,
     python_path: &str,
     project_dir: &str,
+    dev_mode: bool,
 ) -> Result<(), BootstrapFailure> {
     if is_bridge_running() {
         return Err(bootstrap_failure(
@@ -2051,7 +2106,7 @@ fn spawn_bridge_process(
         ));
     }
 
-    let mut command = bridge_command(python_path, project_dir)?;
+    let mut command = bridge_command(python_path, project_dir, dev_mode)?;
     #[cfg(windows)]
     command.creation_flags(0x08000000 | 0x01000000); // CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB
 
@@ -2064,7 +2119,7 @@ fn spawn_bridge_process(
                 app_handle,
                 "Windows denied CREATE_BREAKAWAY_FROM_JOB; retrying with CREATE_NO_WINDOW.",
             );
-            let mut fallback = bridge_command(python_path, project_dir)?;
+            let mut fallback = bridge_command(python_path, project_dir, dev_mode)?;
             fallback.creation_flags(0x08000000); // CREATE_NO_WINDOW
             fallback.spawn().map_err(|fallback_error| {
                 bootstrap_failure(
@@ -2348,7 +2403,7 @@ fn bootstrap_inner(
             Some("service"),
             82,
         );
-        spawn_bridge_process(app_handle, python_path, project_dir)?;
+        spawn_bridge_process(app_handle, python_path, project_dir, dev_mode)?;
     }
 
     set_bootstrap_phase(
@@ -2455,7 +2510,7 @@ async fn retry_bootstrap(
     project_dir: String,
 ) -> Result<(), String> {
     let (python_path, project_dir) = resolve_requested_bootstrap_config(python_path, project_dir)?;
-    execute_bootstrap_async(app_handle, python_path, project_dir, false).await
+    execute_bootstrap_async(app_handle, python_path, project_dir, desktop_dev_mode()).await
 }
 
 #[tauri::command]
@@ -2465,13 +2520,13 @@ async fn start_bridge_with_config(
     project_dir: String,
 ) -> Result<(), String> {
     let (python_path, project_dir) = resolve_requested_bootstrap_config(python_path, project_dir)?;
-    execute_bootstrap_async(app_handle, python_path, project_dir, false).await
+    execute_bootstrap_async(app_handle, python_path, project_dir, desktop_dev_mode()).await
 }
 
 #[tauri::command]
 async fn start_bridge(app_handle: tauri::AppHandle) -> Result<(), String> {
     let (python_path, project_dir) = get_or_discover_config();
-    execute_bootstrap_async(app_handle, python_path, project_dir, false).await
+    execute_bootstrap_async(app_handle, python_path, project_dir, desktop_dev_mode()).await
 }
 
 #[tauri::command]
@@ -2561,35 +2616,47 @@ fn pick_data_export_path(default_name: String, title: Option<String>) -> Option<
     })
 }
 
+/// Files are selected inside their folder; directories are opened directly.
 #[tauri::command]
 fn reveal_in_file_manager(path: String) -> Result<(), String> {
     let target = PathBuf::from(path.trim());
-    if !target.is_file() {
-        return Err("the selected file is unavailable".to_string());
+    let is_dir = target.is_dir();
+    if !is_dir && !target.is_file() {
+        return Err("the selected path is unavailable".to_string());
     }
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");
-        command.arg("-R").arg(&target);
+        if !is_dir {
+            command.arg("-R");
+        }
+        command.arg(&target);
         command
     };
     #[cfg(windows)]
     let mut command = {
         let mut command = Command::new("explorer");
-        command.arg("/select,").arg(&target);
+        if !is_dir {
+            command.arg("/select,");
+        }
+        command.arg(&target);
         command.creation_flags(0x08000000);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = {
         let mut command = Command::new("xdg-open");
-        command.arg(target.parent().unwrap_or(Path::new(".")));
+        command.arg(if is_dir {
+            target.as_path()
+        } else {
+            target.parent().unwrap_or(Path::new("."))
+        });
         command
     };
     command
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("cannot reveal the selected file: {error}"))
+        .map_err(|error| format!("cannot reveal the selected path: {error}"))
 }
 
 #[tauri::command]
@@ -2681,7 +2748,7 @@ fn validated_ga_source(dir: &str) -> Result<String, String> {
 async fn restart_for_current_source(app_handle: tauri::AppHandle) -> Result<String, String> {
     let (python_path, project_dir) = get_or_discover_config();
     let expected_ga_root = effective_ga_root(&project_dir);
-    execute_bootstrap_async(app_handle, python_path, project_dir, false).await?;
+    execute_bootstrap_async(app_handle, python_path, project_dir, desktop_dev_mode()).await?;
     Ok(expected_ga_root)
 }
 
@@ -2828,12 +2895,13 @@ async fn get_macos_titlebar_metrics(
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let no_autostart = args.iter().any(|a| a == "--no-autostart");
-    let dev_mode = args.iter().any(|a| a == "--dev");
+    let dev_mode = desktop_dev_mode();
 
     let (eff_py, eff_project) = get_or_discover_config();
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(window_state_plugin())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let bootstrap_failed = matches!(
                 BOOTSTRAP_STATE.lock().unwrap().phase,
@@ -2890,6 +2958,7 @@ pub fn run() {
                 // traffic lights). titleBarStyle:"Overlay" is macOS-only in Tauri v2.
                 #[cfg(windows)]
                 let _ = w.set_decorations(false);
+                restore_window_state(&w);
                 let _ = w.show();
             }
 
@@ -2968,6 +3037,7 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let label = window.label();
                 if label == "main" {
+                    persist_window_state(window.app_handle());
                     #[cfg(windows)]
                     {
                         // Windows: hide to tray instead of exiting. Bridge stays alive.
@@ -2998,6 +3068,28 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_value(command: &Command, key: &str) -> Option<Option<String>> {
+        command
+            .get_envs()
+            .find(|entry| entry.0 == std::ffi::OsStr::new(key))
+            .map(|entry| entry.1.map(|value| value.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn bridge_child_only_receives_the_vite_origin_in_explicit_dev_mode() {
+        let mut production = Command::new("python");
+        production.env(DESKTOP_DEV_ORIGIN_ENV, "http://localhost:9999");
+        configure_bridge_dev_origin(&mut production, false);
+        assert_eq!(env_value(&production, DESKTOP_DEV_ORIGIN_ENV), Some(None));
+
+        let mut development = Command::new("python");
+        configure_bridge_dev_origin(&mut development, true);
+        assert_eq!(
+            env_value(&development, DESKTOP_DEV_ORIGIN_ENV),
+            Some(Some(DESKTOP_VITE_ORIGIN.to_string()))
+        );
+    }
 
     #[test]
     fn sensitive_diagnostic_lines_are_replaced_and_long_lines_are_bounded() {

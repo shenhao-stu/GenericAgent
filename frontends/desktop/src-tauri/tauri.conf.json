@@ -1,9 +1,12 @@
 {
   "productName": "GenericAgent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.genericagent.app",
   "build": {
-    "frontendDist": "../dist"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build:tauri-assets",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173"
   },
   "app": {
     "withGlobalTauri": true,
@@ -51,7 +54,7 @@
         "visible": false,
         "titleBarStyle": "Overlay",
         "trafficLightPosition": { "x": 13, "y": 22 },
-        "dragDropEnabled": false,
+        "dragDropEnabled": true,
         "url": "loading.html"
       },
       {

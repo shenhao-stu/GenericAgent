@@ -50,32 +50,35 @@ env:
 
 jobs:
   distribution-contract:
-    name: Compiled distribution contract
+    name: Renderer build and distribution contract
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
-      - name: Verify tracked React distribution and package metadata
+          cache: npm
+          cache-dependency-path: frontends/desktop/package-lock.json
+      - name: Install renderer dependencies
         working-directory: frontends/desktop
-        run: npm run test:dist
+        run: npm ci
+      - name: Typecheck and unit-test the renderer
+        working-directory: frontends/desktop
+        run: |
+          npm run typecheck
+          npm test
+      - name: Build the renderer and verify the distribution contract
+        working-directory: frontends/desktop
+        run: npm run build:tauri-assets
       - name: Verify packaging helper syntax
         run: |
           bash -n frontends/desktop/packaging/scripts/macos/install_macos.sh
           bash -n frontends/desktop/scripts/post-dmg.sh
           python3 -m py_compile frontends/desktop/scripts/gen_ds_store.py
-      - name: Reject source and local-development leakage
+      - name: Reject generated output and local-development leakage
         run: |
-          test -z "$(git ls-files -- \
-            'frontends/desktop/src/**' \
-            'frontends/desktop/public/**' \
-            'frontends/desktop/vite.config.*' \
-            'frontends/desktop/tsconfig*.json' \
-            '.agents/**' '.codex/**' '.trellis/**')"
-          test -z "$(find frontends/desktop/dist -type f \
-            \( -name '*.map' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' \) -print)"
+          test -z "$(git ls-files -- 'frontends/desktop/dist/**' '.agents/**' '.codex/**' '.trellis/**')"
           ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- .github frontends
 
   python-contracts:
@@ -151,18 +154,17 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: frontends/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action snapshot
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
           workspaces: frontends/desktop/src-tauri -> target
-      - name: Install Tauri CLI only
+      - name: Install renderer dependencies
         working-directory: frontends/desktop
-        run: |
-          npm install --package-lock=false
-          node -e "const v=require('./node_modules/@tauri-apps/cli/package.json').version; if(v!=='2.11.4') throw new Error('unexpected Tauri CLI '+v)"
-          test ! -e package-lock.json
-      - name: Build tracked Desktop 2.0 distribution into the native shell
+        run: npm ci
+      - name: Build the renderer into the native shell
         working-directory: frontends/desktop
         run: npm run tauri build -- --no-bundle
