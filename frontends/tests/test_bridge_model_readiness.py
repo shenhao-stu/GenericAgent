@@ -65,6 +65,27 @@ class TestDefaultGroupInvariant:
         assert [p["kind"] for p in result["profiles"]] == ["native"]
 
 
+class TestMykeyWriteHook:
+    """Extras that died for lack of a model (scheduler on a fresh install) get retried after any mykey write."""
+
+    def test_every_editor_write_runs_the_hook(self, profile_manager: AgentManager, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(profile_manager, "on_mykey_saved", lambda: calls.append("saved"))
+
+        first = profile_manager.add_model_profile(dict(OAI_MODEL))          # add + auto-join → 2 writes
+        second = profile_manager.add_model_profile({**OAI_MODEL, "name": "second", "model": "gpt-x"})
+        profile_manager.update_model_profile(second["profileId"], {**OAI_MODEL, "name": "second", "model": "gpt-y"})
+        profile_manager.add_to_mixin(second["profileId"])
+        profile_manager.reorder_mixin(["second", "GA_TP_auto"])
+        profile_manager.remove_from_mixin(second["profileId"])
+        profile_manager.delete_model_profile(second["profileId"])
+
+        assert first["profileId"] is not None and len(calls) == 8
+
+    def test_module_wires_the_hook_to_the_service_manager(self):
+        assert _mod.manager.on_mykey_saved == _mod.services.restart_broken_extras
+
+
 class _FakeSession:
     """Stand-in for llmcore.Native*Session: records the cfg it was built with, replays scripted chunks."""
     instances: list = []

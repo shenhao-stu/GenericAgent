@@ -8,6 +8,7 @@ const CTA_LABEL_KEY: Record<CTAState, string> = {
   send: 'composer.send',
   disabled: 'composer.send',
   stop: 'composer.stop',
+  busy: 'composer.thinking',
   queue: 'composer.queue',
 };
 
@@ -47,11 +48,11 @@ export function PrimaryCTA({ state, onSend, onStop, onQueue }: Props) {
       data-slot="composer-cta"
       data-state={state}
       onClick={handleClick}
-      disabled={state === 'disabled'}
+      disabled={state === 'disabled' || state === 'busy'}
       aria-label={label}
       title={label}
     >
-      {state === 'stop' && <StopIcon />}
+      {(state === 'stop' || state === 'busy') && <StopIcon />}
       {state === 'queue' && <QueueIcon />}
       {(state === 'send' || state === 'disabled') && <SendIcon />}
     </button>

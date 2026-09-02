@@ -13,6 +13,7 @@ import {
   type PollResult,
   type SessionInfo,
 } from '../services/chat';
+import { errorText } from '../services/http';
 import { subscribe, onBridgeStatusChange } from '../services/ws';
 import { applySessionTitle } from '../components/layout/sessionList';
 import { t } from '../i18n/t';
@@ -133,10 +134,6 @@ export function mergeMessages(
     merged.push({ ...partial, id: partialId, status: 'in_progress' });
   }
   return merged;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /** Bridge rejected or never received the prompt: keep the user's text visible, mark it failed, explain why. */

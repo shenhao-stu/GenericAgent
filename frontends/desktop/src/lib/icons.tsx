@@ -22,6 +22,14 @@ const GLYPH_MAP: Record<string, string> = {
   'pinned': '\uEBA0',
   'edit': '\uEA73',
   'trash': '\uEA81',
+  'close': '\uEA76',
+  'arrow-up': '\uEAA1',
+  'arrow-down': '\uEA9A',
+  'settings': '\uEB52',
+  'hubot': '\uEB08',
+  'database': '\uEACE',
+  'plug': '\uEB2D',
+  'question': '\uEB32',
 };
 
 export function Codicon({

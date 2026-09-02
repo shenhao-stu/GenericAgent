@@ -25,4 +25,10 @@ describe('computeCTAState', () => {
     expect(computeCTAState(true, false, true)).toBe('disabled');
     expect(computeCTAState(false, false, true)).toBe('disabled');
   });
+
+  it('returns busy instead of stop when the backend cannot interrupt', () => {
+    expect(computeCTAState(true, false, false, false)).toBe('busy');
+    expect(computeCTAState(true, true, false, false)).toBe('queue');
+    expect(computeCTAState(false, true, false, false)).toBe('send');
+  });
 });

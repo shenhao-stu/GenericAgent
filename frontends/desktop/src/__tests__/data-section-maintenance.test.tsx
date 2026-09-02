@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   exportData: vi.fn(),
   loadSessions: vi.fn(),
   fetchServices: vi.fn(),
+  stopAllExtras: vi.fn(),
+  startAllExtras: vi.fn(),
   chatState: {
     runningSessions: new Set<string>(),
     status: 'idle',
@@ -67,7 +69,9 @@ vi.mock('../stores/chat', () => {
   return { useChatStore };
 });
 vi.mock('../stores/services', () => {
-  const currentState = () => ({ ...mocks.servicesState, fetchServices: mocks.fetchServices });
+  const currentState = () => ({
+    ...mocks.servicesState, fetchServices: mocks.fetchServices, stopAllExtras: mocks.stopAllExtras, startAllExtras: mocks.startAllExtras,
+  });
   const useServicesStore = (selector: (value: ReturnType<typeof currentState>) => unknown) => (
     selector(currentState())
   );
@@ -113,8 +117,51 @@ describe('DataSection maintenance boundary', () => {
     expect((await screen.findByRole('button', { name: 'data.importDataBtn' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'data.exportDataBtn' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole('status').textContent).toContain('sessions=1');
-    expect(screen.getByRole('status').textContent).toContain('services=1');
+    // The gate names what is running (localized component name), not a bare count.
+    expect(screen.getByRole('status').textContent).toContain('services=proc.scheduler');
     expect(mocks.fetchServices).toHaveBeenCalledOnce();
+  });
+
+  it('offers a one-click stop for the managed services that hold the gate, and brings them back after the run', async () => {
+    mocks.servicesState.services = [{ id: 'frontends/conductor.py', managed: true, running: true }];
+    // The real store re-reads the panel before resolving, so the gate is already open when the button settles.
+    mocks.stopAllExtras.mockImplementation(async () => { mocks.servicesState.services = []; return true; });
+    mocks.startAllExtras.mockResolvedValue(true);
+    mocks.tauriInvoke.mockResolvedValue('/data/out.zip');
+    mocks.exportData.mockResolvedValue({ path: '/data/out.zip', exportedAt: '', sourceMode: 'included', content: { memory: 0, responses: 0, sessions: 0 } });
+
+    render(<DataSection />);
+    fireEvent.click(await screen.findByTestId('data-stop-extras'));
+    await waitFor(() => expect(mocks.stopAllExtras).toHaveBeenCalledOnce());
+    expect(mocks.toastError).not.toHaveBeenCalled();
+
+    await waitFor(() => expect((screen.getByRole('button', { name: 'data.exportDataBtn' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'data.exportDataBtn' }));
+    await waitFor(() => expect(mocks.modalConfirm).toHaveBeenCalledOnce());
+    await act(async () => { await mocks.modalConfirm.mock.calls[0][0].onOk(); });
+
+    expect(mocks.exportData).toHaveBeenCalledOnce();
+    expect(mocks.startAllExtras).toHaveBeenCalledOnce();
+  });
+
+  it('never restarts extras it did not stop itself', async () => {
+    mocks.tauriInvoke.mockResolvedValue('/data/out.zip');
+    mocks.exportData.mockResolvedValue({ path: '/data/out.zip', exportedAt: '', sourceMode: 'included', content: { memory: 0, responses: 0, sessions: 0 } });
+
+    render(<DataSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'data.exportDataBtn' }));
+    await waitFor(() => expect(mocks.modalConfirm).toHaveBeenCalledOnce());
+    await act(async () => { await mocks.modalConfirm.mock.calls[0][0].onOk(); });
+
+    expect(mocks.startAllExtras).not.toHaveBeenCalled();
+  });
+
+  it('does not offer the stop when only a chat is running (the user must finish or stop it)', async () => {
+    mocks.chatState.status = 'running';
+
+    render(<DataSection />);
+    await screen.findByRole('status');
+    expect(screen.queryByTestId('data-stop-extras')).toBeNull();
   });
 
   it('shows backup entrypoints when the bridge reports support', async () => {

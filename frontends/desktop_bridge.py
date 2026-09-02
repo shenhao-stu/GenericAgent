@@ -46,7 +46,7 @@ from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from aiohttp import web, WSMsgType
 from data_backup import (
     BackupFormatError,
@@ -330,6 +330,10 @@ class AgentManager:
         # Legacy monolithic store; migrated into _sessions_dir on first load, then retired.
         self._sessions_file = Path(self.ga_root) / "temp" / "desktop_sessions.json"
         self._load_sessions()
+
+    # Runs after every mykey.py write (model editor, mixin edits, raw import). The module rebinds it to
+    # the service manager once that exists; extras that died for lack of a model get their retry here.
+    on_mykey_saved: Callable[[], None] = staticmethod(lambda: None)
 
     @property
     def mykey_path(self) -> str:
@@ -683,6 +687,7 @@ class AgentManager:
         self._mykey_file().write_text(text, encoding="utf-8")
         self._invalidate_mykey_cache()
         self._reload_live_agents()
+        self.on_mykey_saved()
         return self.list_model_profiles()
 
     def _reload_live_agents(self) -> None:
@@ -1920,6 +1925,9 @@ class ServiceManager:
 
 
 services = ServiceManager(str(DEFAULT_GA_ROOT), hub.emit)
+# Healthy extras hot-reload mykey on their own; only the ones that already died (e.g. the scheduler
+# that found no model on a fresh install) need the retry, and they need it after *every* write.
+manager.on_mykey_saved = services.restart_broken_extras
 
 
 def _bridge_shutdown_services() -> None:
@@ -2762,9 +2770,6 @@ async def mykey_save_handler(request):
     try:
         with manager.mutation():
             profiles = manager._save_mykey_text(str(content))
-            # Importing/rewriting mykey may recover only extras that are already
-            # broken. Healthy tasks keep their current process/model snapshot.
-            services.restart_broken_extras()
     except MaintenanceConflict:
         raise
     except Exception as e:

@@ -23,13 +23,11 @@ vi.mock('../components/chat/Composer/AtRefPopover', () => ({ AtRefPopover: () =>
 vi.mock('../components/chat/Composer/ContextMenu', () => ({ ContextMenu: () => null }));
 vi.mock('../components/chat/Composer/AttachmentStrip', () => ({ AttachmentStrip: () => null }));
 vi.mock('../components/chat/Composer/SkillPanel', () => ({ SkillPanel: () => null }));
-vi.mock('../components/chat/Composer/WorkDirPill', () => ({ WorkDirPill: () => null }));
 vi.mock('../components/chat/Composer/PrimaryCTA', () => ({
   PrimaryCTA: () => null,
   computeCTAState: () => 'idle',
 }));
 vi.mock('../components/chat/Composer/StatusStack', () => ({ StatusStack: () => null }));
-vi.mock('../components/chat/Composer/usePlaceholder', () => ({ usePlaceholder: () => ({ text: '' }) }));
 vi.mock('../components/chat/Composer/ModelSelector', () => ({
   ModelSelector: () => <span data-testid="session-model-control">Session model</span>,
 }));
@@ -41,10 +39,11 @@ class ResizeObserverStub {
 vi.stubGlobal('ResizeObserver', ResizeObserverStub);
 
 
-describe('Composer model-control slot', () => {
+describe('Composer context slots', () => {
   it('renders a supplied channel model control instead of the Session selector', () => {
     render(
       <Composer
+        placeholder=""
         onSend={vi.fn()}
         onStop={vi.fn()}
         isGenerating={false}
@@ -54,5 +53,15 @@ describe('Composer model-control slot', () => {
 
     expect(screen.getByTestId('conductor-model-control')).toBeTruthy();
     expect(screen.queryByTestId('session-model-control')).toBeNull();
+  });
+
+  it('renders the leading slot only when the host supplies one', () => {
+    const { rerender } = render(
+      <Composer placeholder="" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} leading={<span data-testid="workdir" />} />,
+    );
+    expect(screen.getByTestId('workdir')).toBeTruthy();
+
+    rerender(<Composer placeholder="" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    expect(screen.queryByTestId('workdir')).toBeNull();
   });
 });

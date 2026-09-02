@@ -4,6 +4,8 @@ import {
   fetchServicesPanel,
   startServiceById,
   stopServiceById,
+  stopAllExtras,
+  startAllExtras,
   exitBridge,
   fetchServiceLogs,
   fetchMykeyContent,
@@ -23,6 +25,9 @@ interface ServicesState {
   fetchServices: () => Promise<void>;
   startService: (id: string) => Promise<boolean>;
   stopService: (id: string) => Promise<boolean>;
+  /** Stop / start every bridge-owned extra, then re-read the panel so gates depending on it settle immediately. */
+  stopAllExtras: () => Promise<boolean>;
+  startAllExtras: () => Promise<boolean>;
   exitBridge: () => Promise<boolean>;
   restartService: (id: string) => Promise<boolean>;
   fetchLogs: (id: string, tail?: number) => Promise<string[]>;
@@ -48,6 +53,16 @@ export const useServicesStore = create<ServicesState>((set, get) => {
       }));
     }
   });
+
+  async function runExtras(command: () => Promise<void>): Promise<boolean> {
+    try {
+      await command();
+      await get().fetchServices();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   return {
     services: [],
@@ -98,6 +113,9 @@ export const useServicesStore = create<ServicesState>((set, get) => {
         return false;
       }
     },
+
+    stopAllExtras: () => runExtras(stopAllExtras),
+    startAllExtras: () => runExtras(startAllExtras),
 
     async exitBridge() {
       try {

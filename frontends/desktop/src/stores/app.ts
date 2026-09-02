@@ -14,16 +14,10 @@ interface AppState {
 export const useAppStore = create<AppState>((set) => ({
   activePage: 'chat',
   sidebarCollapsed: false,
-  servicesTab: 'channels',
+  // The nav item is named 运行状态 / Runtime status, so that is the tab it lands on.
+  servicesTab: 'status',
 
   setPage: (page) => set({ activePage: page }),
   setServicesTab: (tab) => set({ servicesTab: tab }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 }));
-
-// Legacy interop: listen for ga:go-page CustomEvent from vanilla app.js
-if (typeof window !== 'undefined') {
-  window.addEventListener('ga:go-page', ((e: CustomEvent<{ page: PageId }>) => {
-    useAppStore.getState().setPage(e.detail.page);
-  }) as EventListener);
-}

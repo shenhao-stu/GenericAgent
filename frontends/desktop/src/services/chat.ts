@@ -1,4 +1,4 @@
-import { BRIDGE_BASE } from './constants';
+import { deleteJson, getJson, patchJson, postJson } from './http';
 
 export type MessageStatus = 'completed' | 'in_progress' | 'failed';
 
@@ -29,97 +29,20 @@ export interface SessionInfo {
   workDir?: string | null;
 }
 
+export interface LiveModel {
+  isMixin: boolean;
+  current: string;
+  llmNo?: number;
+  runningLlmNo?: number | null;
+  runningModel?: string | null;
+}
+
 export interface PollResult {
   messages: Message[];
   partial?: Message;
   status: 'running' | 'idle';
   plan?: unknown;
-  model?: { isMixin: boolean; current: string; llmNo?: number; runningLlmNo?: number | null; runningModel?: string | null };
-}
-
-function useMock(): boolean {
-  return import.meta.env.VITE_MOCK === 'true';
-}
-
-// --- Mock state for dev mode ---
-let mockMessages: Map<string, Message[]> = new Map();
-let mockSessionCounter = 0;
-const mockRunning = new Set<string>();
-
-function mockDelay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// --- API functions ---
-
-/** Bridge JSON contract: a non-2xx status or `{ok:false}` is a failure carrying the bridge's `error` text. */
-async function bridgeJson<T = Record<string, any>>(res: Response): Promise<T> {
-  const data = await res.json().catch(() => ({})) as Record<string, any>;
-  if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-  return data as T;
-}
-
-function normalizeMessage(msg: Record<string, unknown>, status: MessageStatus = 'completed'): Message {
-  // Bridge timestamps (`ts`, `createdAt`) are Unix seconds (Python time.time()).
-  // The UI works in milliseconds (Date.now(), LiveDuration), so scale up. Local
-  // optimistic messages are already ms and never pass through here.
-  const rawTs = (msg.createdAt as number) ?? (msg.ts as number);
-  const m: Message = {
-    id: String(msg.id),
-    role: msg.role as Message['role'],
-    content: (msg.content as string) || '',
-    status: (msg.status as MessageStatus) ?? status,
-    createdAt: typeof rawTs === 'number' ? Math.round(rawTs * 1000) : undefined,
-  };
-  if (Array.isArray(msg.turn_segs)) {
-    m.turn_segs = msg.turn_segs as string[];
-  }
-  if (Array.isArray(msg.images) && msg.images.length > 0) {
-    m.images = msg.images as { name: string; path: string }[];
-  }
-  if (Array.isArray(msg.files) && msg.files.length > 0) {
-    m.files = msg.files as { name: string; path: string; size?: number }[];
-  }
-  // executionMs is already in milliseconds (bridge computes it at turn end).
-  if (typeof msg.executionMs === 'number') {
-    m.executionMs = msg.executionMs;
-  }
-  return m;
-}
-
-
-export async function createSession(cwd = ''): Promise<string> {
-  if (useMock()) {
-    const id = `mock-session-${++mockSessionCounter}`;
-    mockMessages.set(id, []);
-    return id;
-  }
-  const res = await fetch(`${BRIDGE_BASE}/session/new`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cwd, mcp_servers: [] }),
-  });
-  const data = await bridgeJson(res);
-  if (typeof data.sessionId !== 'string' || !data.sessionId) throw new Error('bridge returned no sessionId');
-  return data.sessionId;
-}
-
-async function uploadImage(sessionId: string, name: string, dataUrl: string): Promise<string> {
-  const res = await fetch(`${BRIDGE_BASE}/upload`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, dataUrl, sid: sessionId }),
-  });
-  return (await bridgeJson(res)).path;
-}
-
-export async function uploadFile(name: string, dataUrl: string): Promise<string> {
-  const res = await fetch(`${BRIDGE_BASE}/upload`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, dataUrl, sid: '_files' }),
-  });
-  return (await bridgeJson(res)).path;
+  model?: LiveModel;
 }
 
 export interface DropStat {
@@ -129,104 +52,76 @@ export interface DropStat {
   preview?: string;
 }
 
+type Attachment = { name: string; path: string; size?: number };
+type ImageAttachment = { name: string; path: string; base64?: string };
+
+function normalizeMessage(msg: Record<string, unknown>, status: MessageStatus = 'completed'): Message {
+  // Bridge timestamps (`ts`, `createdAt`) are Unix seconds; the UI works in ms. Local optimistic
+  // messages are already ms and never pass through here. `executionMs` is already ms.
+  const rawTs = (msg.createdAt as number) ?? (msg.ts as number);
+  return {
+    id: String(msg.id),
+    role: msg.role as Message['role'],
+    content: (msg.content as string) || '',
+    status: (msg.status as MessageStatus) ?? status,
+    createdAt: typeof rawTs === 'number' ? Math.round(rawTs * 1000) : undefined,
+    ...(Array.isArray(msg.turn_segs) && { turn_segs: msg.turn_segs as string[] }),
+    ...(Array.isArray(msg.images) && msg.images.length > 0 && { images: msg.images as Message['images'] }),
+    ...(Array.isArray(msg.files) && msg.files.length > 0 && { files: msg.files as Message['files'] }),
+    ...(typeof msg.executionMs === 'number' && { executionMs: msg.executionMs }),
+  };
+}
+
+export async function createSession(cwd = ''): Promise<string> {
+  const data = await postJson('/session/new', { cwd, mcp_servers: [] });
+  if (typeof data.sessionId !== 'string' || !data.sessionId) throw new Error('bridge returned no sessionId');
+  return data.sessionId;
+}
+
+/** Uploads land under desktop_uploads/<sid>/ so `/upload/raw` can serve them back into the thread. */
+async function uploadDataUrl(sid: string, name: string, dataUrl: string): Promise<string> {
+  return (await postJson('/upload', { name, dataUrl, sid })).path;
+}
+
+export const uploadFile = (name: string, dataUrl: string) => uploadDataUrl('_files', name, dataUrl);
+
 /**
- * Inspect a path dropped onto the window via Tauri's native drag-drop.
- * Native drops carry absolute paths (not File objects), so the bridge tells us
- * whether the path is a folder or file and — for images when `preview` is set —
- * returns a base64 data URL for the thumbnail. Files/folders otherwise go to the
- * agent by path (read via file_read / os.walk); no bytes cross for them.
+ * Inspect a path dropped onto the window via Tauri's native drag-drop. Native drops carry absolute
+ * paths, so the bridge says whether it is a folder or file and — for images with `preview` — returns a
+ * base64 thumbnail. Files/folders otherwise reach the agent by path; no bytes cross for them.
  */
-export async function statDroppedPath(path: string, preview: boolean): Promise<DropStat | null> {
-  try {
-    const res = await fetch(`${BRIDGE_BASE}/drop/stat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, preview }),
-    });
-    const data = await res.json();
-    if (!data.ok) return null;
-    return { isDir: !!data.is_dir, size: data.size ?? 0, name: data.name ?? path, preview: data.preview };
-  } catch {
-    return null;
-  }
+export function statDroppedPath(path: string, preview: boolean): Promise<DropStat | null> {
+  return postJson('/drop/stat', { path, preview })
+    .then((d) => ({ isDir: !!d.is_dir, size: d.size ?? 0, name: d.name ?? path, preview: d.preview }))
+    .catch(() => null);
 }
 
 export async function sendPrompt(
   sessionId: string,
   prompt: string,
-  files?: { name: string; path: string; size?: number }[],
-  images?: { name: string; path: string; base64?: string }[],
+  files?: Attachment[],
+  images?: ImageAttachment[],
 ): Promise<string> {
-  if (useMock()) {
-    const now = Date.now();
-    const userMsg: Message = { id: `msg-${now}`, role: 'user', content: prompt, status: 'completed', createdAt: now };
-    const msgs = mockMessages.get(sessionId) || [];
-    msgs.push(userMsg);
-    mockMessages.set(sessionId, msgs);
-    mockRunning.add(sessionId);
-
-    setTimeout(() => {
-      const ts = Date.now();
-      const reply: Message = {
-        id: `msg-${ts}`,
-        role: 'assistant',
-        content: `这是对「${prompt.slice(0, 30)}」的模拟回复。\n\n实际使用时会连接 Python bridge 获取真实 LLM 响应。`,
-        status: 'completed',
-        createdAt: ts,
-      };
-      const current = mockMessages.get(sessionId) || [];
-      current.push(reply);
-      mockMessages.set(sessionId, current);
-      mockRunning.delete(sessionId);
-    }, 800);
-
-    return userMsg.id;
-  }
-
   const filesMeta = (files || []).map((f) => ({ name: f.name, path: f.path, size: f.size }));
-
-  // Upload images to the bridge so they land under desktop_uploads/, whose files
-  // /upload/raw can serve back into the message bubble. Whenever we have base64
-  // (paste, file-picker, or a native drop preview) we upload — a raw disk path
-  // like C:\Users\... would be rejected by /upload/raw's path whitelist and the
-  // thumbnail would break after send. Only fall back to a bare path when there
-  // is no base64 to upload (should not happen for real images).
+  // Whenever base64 is available (paste, picker, native-drop preview) the image is uploaded: a raw disk
+  // path would be rejected by /upload/raw's whitelist and the thumbnail would break after send.
   const imageMetas: { name: string; path: string }[] = [];
   for (const img of images || []) {
     const dataUrl = img.base64 || (img.path?.startsWith('data:') ? img.path : undefined);
     if (dataUrl) {
-      const path = await uploadImage(sessionId, img.name, dataUrl);
-      imageMetas.push({ name: img.name, path });
-    } else if (img.path && !img.path.startsWith('data:') && img.path !== img.name) {
+      imageMetas.push({ name: img.name, path: await uploadDataUrl(sessionId, img.name, dataUrl) });
+    } else if (img.path && img.path !== img.name) {
       imageMetas.push({ name: img.name, path: img.path });
     }
   }
-
-  const res = await fetch(`${BRIDGE_BASE}/session/${sessionId}/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, prompt, display: prompt, files: filesMeta, imageMetas }),
-  });
-  return (await bridgeJson(res)).userMessageId;
+  const data = await postJson(`/session/${sessionId}/prompt`, { sessionId, prompt, display: prompt, files: filesMeta, imageMetas });
+  return data.userMessageId;
 }
 
-export async function pollMessages(
-  sessionId: string,
-  afterId?: string,
-  limit: number = 50,
-): Promise<PollResult> {
-  if (useMock()) {
-    await mockDelay(100);
-    const msgs = mockMessages.get(sessionId) || [];
-    const afterIdx = afterId ? msgs.findIndex((m) => m.id === afterId) : -1;
-    const newMsgs = msgs.slice(afterIdx + 1);
-    return { messages: newMsgs, status: mockRunning.has(sessionId) ? 'running' : 'idle' };
-  }
-
+export async function pollMessages(sessionId: string, afterId?: string, limit = 50): Promise<PollResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (afterId) params.set('after', afterId);
-  const res = await fetch(`${BRIDGE_BASE}/session/${sessionId}/messages?${params}`);
-  const data = await res.json();
+  const data = await getJson(`/session/${sessionId}/messages?${params}`);
   return {
     messages: (data.messages || []).map((m: Record<string, unknown>) => normalizeMessage(m)),
     partial: data.partial ? normalizeMessage(data.partial, 'in_progress') : undefined,
@@ -236,64 +131,18 @@ export async function pollMessages(
   };
 }
 
-export async function cancelGeneration(sessionId: string): Promise<void> {
-  if (useMock()) return;
-  await fetch(`${BRIDGE_BASE}/session/${sessionId}/cancel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId }),
-  });
+export const cancelGeneration = (sessionId: string) => postJson(`/session/${sessionId}/cancel`, { sessionId }).then(() => undefined);
+
+export function setSessionModel(sessionId: string, llmNo: number): Promise<{ ok: boolean; llmNo: number; model: LiveModel }> {
+  return postJson(`/session/${sessionId}/model`, { llmNo }) as Promise<{ ok: boolean; llmNo: number; model: LiveModel }>;
 }
 
-export async function setSessionModel(
-  sessionId: string,
-  llmNo: number,
-): Promise<{ ok: boolean; llmNo: number; model: { isMixin: boolean; current: string; llmNo?: number; runningLlmNo?: number | null; runningModel?: string | null } }> {
-  const res = await fetch(`${BRIDGE_BASE}/session/${sessionId}/model`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ llmNo }),
-  });
-  return res.json();
-}
-
+/** Conductor worker sessions (`tui_` prefix) are internal dispatch and never listed. */
 export async function listSessions(): Promise<SessionInfo[]> {
-  if (useMock()) {
-    return Array.from(mockMessages.keys()).map((id) => ({
-      id,
-      title: `Session ${id.split('-').pop()}`,
-      untitled: true,
-    }));
-  }
-  const res = await fetch(`${BRIDGE_BASE}/sessions`);
-  const data = await res.json();
-  const all: SessionInfo[] = data.sessions || [];
-  // Filter out conductor worker sessions (tui_ prefix = internal dispatch)
-  return all.filter((s) => !s.id.startsWith('tui_'));
+  const data = await getJson<{ sessions?: SessionInfo[] }>('/sessions');
+  return (data.sessions || []).filter((s) => !s.id.startsWith('tui_'));
 }
 
-export async function deleteSession(sessionId: string): Promise<void> {
-  if (useMock()) {
-    mockMessages.delete(sessionId);
-    return;
-  }
-  await fetch(`${BRIDGE_BASE}/session/${sessionId}`, { method: 'DELETE' });
-}
-
-export async function renameSession(sessionId: string, title: string): Promise<void> {
-  if (useMock()) return;
-  await fetch(`${BRIDGE_BASE}/session/${sessionId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
-  });
-}
-
-export async function pinSession(sessionId: string, pinned: boolean): Promise<void> {
-  if (useMock()) return;
-  await fetch(`${BRIDGE_BASE}/session/${sessionId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pinned }),
-  });
-}
+export const deleteSession = (sessionId: string) => deleteJson(`/session/${sessionId}`).then(() => undefined);
+export const renameSession = (sessionId: string, title: string) => patchJson(`/session/${sessionId}`, { title }).then(() => undefined);
+export const pinSession = (sessionId: string, pinned: boolean) => patchJson(`/session/${sessionId}`, { pinned }).then(() => undefined);

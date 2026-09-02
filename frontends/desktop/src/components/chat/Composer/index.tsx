@@ -12,33 +12,30 @@ import { ContextMenu } from './ContextMenu';
 import { ModelSelector } from './ModelSelector';
 import { AttachmentStrip } from './AttachmentStrip';
 import { SkillPanel } from './SkillPanel';
-import { WorkDirPill } from './WorkDirPill';
 import { PrimaryCTA, computeCTAState } from './PrimaryCTA';
 import { StatusStack } from './StatusStack';
-import { usePlaceholder } from './usePlaceholder';
 import { useI18n } from '../../../i18n';
 import { candidatesFromDataTransfer, isFileDrag, useAttachmentIngestion } from './useAttachmentIngestion';
 import { statDroppedPath } from '../../../services/chat';
-import { useSettingsStore } from '../../../stores/settings';
-import { useChatStore } from '../../../stores/chat';
 import './composer.css';
 
-// Mixin cannot consume the desktop image payload. Use the authoritative
-// session/default profile binding and degrade native image paths to prompt text.
-function currentModelIsMixin(): boolean {
-  const { modelProfiles, defaultModelNo } = useSettingsStore.getState();
-  const sessionModelNo = useChatStore.getState().sessionModelNo;
-  const no = sessionModelNo ?? defaultModelNo;
-  return modelProfiles[no]?.kind === 'mixin';
-}
-
+/**
+ * Context-free input surface. Everything that depends on *where* it is used (chat vs. conductor) arrives as
+ * props: the placeholder, the leading toolbar slot, the model control, whether a running turn can be stopped,
+ * and whether images must be degraded to paths (aggregation backends cannot take image payloads).
+ */
 interface Props {
   sessionId?: string | null;
+  placeholder: string;
   onSend: (text: string, opts?: SendOptions) => void;
   onStop: () => void;
   isGenerating: boolean;
+  /** False when the backend cannot interrupt a running turn: the CTA then shows busy instead of a dead Stop. */
+  canStop?: boolean;
+  imagesAsPaths?: boolean;
   editorRef?: React.RefObject<RichEditorHandle | null>;
   hideStatusStack?: boolean;
+  leading?: React.ReactNode;
   modelControl?: React.ReactNode | null;
 }
 
@@ -46,14 +43,16 @@ let composerInstanceCounter = 0;
 let nativeAttachmentIdCounter = 0;
 const EMPTY_ATTACHMENTS: AttachmentFile[] = [];
 
-export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: externalEditorRef, hideStatusStack, modelControl }: Props) {
+export function Composer({
+  sessionId, placeholder, onSend, onStop, isGenerating, canStop = true, imagesAsPaths = false,
+  editorRef: externalEditorRef, hideStatusStack, leading, modelControl,
+}: Props) {
   const internalEditorRef = useRef<RichEditorHandle>(null);
   const editorRef = (externalEditorRef ?? internalEditorRef) as React.RefObject<RichEditorHandle>;
   const composerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
-  const { text: placeholderText } = usePlaceholder();
   const { t } = useI18n();
   const [standaloneViewId] = useState(() => `__composer_instance_${++composerInstanceCounter}__`);
   const viewSessionId = sessionId === undefined ? standaloneViewId : sessionId;
@@ -169,7 +168,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
     }
     let outText = text;
     if (readyImages.length > 0) {
-      if (currentModelIsMixin()) {
+      if (imagesAsPaths) {
         const pathLines = readyImages
           .map((f) => f.path && f.path !== f.name ? `[图片: ${f.path}]` : null)
           .filter(Boolean)
@@ -183,7 +182,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
     editorRef.current?.clear();
     clearAttachments();
     setComposerDraft(viewSessionId, '');
-  }, [attachments, clearAttachments, editorRef, onSend, plainText, setComposerDraft, viewSessionId]);
+  }, [attachments, clearAttachments, editorRef, imagesAsPaths, onSend, plainText, setComposerDraft, viewSessionId]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -337,7 +336,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
 
   const hasContent = plainText.trim().length > 0 || attachments.length > 0;
   const hasBlockingAttachments = attachments.some((a) => a.status !== 'ready');
-  const ctaState = computeCTAState(isGenerating, hasContent, hasBlockingAttachments);
+  const ctaState = computeCTAState(isGenerating, hasContent, hasBlockingAttachments, canStop);
 
   return (
     <div
@@ -367,7 +366,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
         <div data-slot="composer-input-row">
           <RichEditorInput
             ref={editorRef}
-            placeholder={placeholderText}
+            placeholder={placeholder}
             disabled={false}
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
@@ -386,7 +385,7 @@ export function Composer({ sessionId, onSend, onStop, isGenerating, editorRef: e
               onPasteImage={handlePasteFromClipboard}
             />
             <SkillPanel onSelect={handleSkillSelect} />
-            <WorkDirPill />
+            {leading}
           </div>
           <div data-slot="composer-toolbar-right">
             {modelControl === undefined ? <ModelSelector /> : modelControl}

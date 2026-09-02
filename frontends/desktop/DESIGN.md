@@ -95,7 +95,7 @@ existing core contracts.
 
 ## Version and release contract
 
-Desktop package metadata is `0.2.2` across npm, Cargo, Tauri, and the generated provenance (`npm run test:dist`
+Desktop package metadata is `0.2.3` across npm, Cargo, Tauri, and the generated provenance (`npm run test:dist`
 enforces the match). A `desktop-portable-*` tag starts three read-only platform builders; each runs `npm ci`,
 typechecks and unit-tests the renderer, then `tauri build` (which builds and verifies `dist/**`). One separate
 publisher receives write permission only after all three succeed, validates the six expected files and checksums,

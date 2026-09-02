@@ -1,4 +1,5 @@
 import { BRIDGE_BASE } from './constants';
+import { BridgeError, postJson } from './http';
 
 export type BackupSourceMode = 'included' | 'localRepository';
 
@@ -36,37 +37,20 @@ export interface DataExportResult {
 
 export type DataBackupAvailability = true | false | null;
 
-export class DataBackupError extends Error {
-  readonly code: string | null;
-  readonly runningSessions: string[];
-  readonly runningExtras: string[];
+const stringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
-  constructor(message: string, payload: Record<string, unknown>) {
-    super(message);
-    this.name = 'DataBackupError';
-    this.code = typeof payload.code === 'string' ? payload.code : null;
-    this.runningSessions = Array.isArray(payload.runningSessions)
-      ? payload.runningSessions.filter((value): value is string => typeof value === 'string')
-      : [];
-    this.runningExtras = Array.isArray(payload.runningExtras)
-      ? payload.runningExtras.filter((value): value is string => typeof value === 'string')
-      : [];
-  }
+/** A `maintenance_conflict` (409) names what is still running so the UI can say exactly what to stop. */
+export class DataBackupError extends BridgeError {
+  readonly runningSessions = stringList(this.payload.runningSessions);
+  readonly runningExtras = stringList(this.payload.runningExtras);
 }
 
-async function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${BRIDGE_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`;
-    throw new DataBackupError(message, data as Record<string, unknown>);
-  }
-  return data as T;
-}
+const asBackupError = (error: unknown): never => {
+  throw error instanceof BridgeError ? new DataBackupError(error.message, error.status, error.payload) : error;
+};
+
+const post = <T>(path: string, body: Record<string, unknown>): Promise<T> => postJson<T>(path, body).catch(asBackupError);
 
 export async function supportsDataBackupApi(): Promise<DataBackupAvailability> {
   const controller = new AbortController();
@@ -108,17 +92,7 @@ export function backupFilename(lang: string, date = new Date()): string {
   return `GenericAgent-${label}-${stamp}.zip`;
 }
 
-export function inspectDataImport(sourcePath: string): Promise<BackupInspection> {
-  return postJson('/memory/import/inspect', { sourcePath });
-}
-
-export function importData(sourcePath: string): Promise<DataImportResult> {
-  return postJson('/memory/import', { sourcePath });
-}
-
-export function exportData(
-  destinationPath: string,
-  sourceMode: BackupSourceMode,
-): Promise<DataExportResult> {
-  return postJson('/memory/export', { destinationPath, sourceMode });
-}
+export const inspectDataImport = (sourcePath: string) => post<BackupInspection>('/memory/import/inspect', { sourcePath });
+export const importData = (sourcePath: string) => post<DataImportResult>('/memory/import', { sourcePath });
+export const exportData = (destinationPath: string, sourceMode: BackupSourceMode) =>
+  post<DataExportResult>('/memory/export', { destinationPath, sourceMode });

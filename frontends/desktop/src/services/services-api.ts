@@ -1,4 +1,4 @@
-import { BRIDGE_BASE } from './constants';
+import { fetchJson, getJson, jsonInit, postJson } from './http';
 
 export interface ServiceInfo {
   id: string;
@@ -29,85 +29,24 @@ export interface ConductorModelState {
   fallbackReason: ModelFallbackReason;
 }
 
-export async function fetchConductorModel(): Promise<ConductorModelState> {
-  const res = await fetch(`${BRIDGE_BASE}/services/conductor/model`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.model;
-}
+type ServiceResult = { ok: boolean; service?: ServiceInfo };
 
-export async function saveConductorModel(llmNo: number): Promise<ConductorModelState> {
-  const res = await fetch(`${BRIDGE_BASE}/services/conductor/model`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ llmNo }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.model;
-}
+export const fetchConductorModel = () => getJson<{ model: ConductorModelState }>('/services/conductor/model').then((d) => d.model);
+export const saveConductorModel = (llmNo: number) => postJson<{ model: ConductorModelState }>('/services/conductor/model', { llmNo }).then((d) => d.model);
+export const fetchServicesPanel = () => getJson<{ services?: ServiceInfo[] }>('/services/panel').then((d) => d.services ?? []);
 
-export async function fetchServicesPanel(): Promise<ServiceInfo[]> {
-  const res = await fetch(`${BRIDGE_BASE}/services/panel`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.services ?? [];
-}
+/** Start/stop answer with `ok:false` plus the service's error state; that state is data, not a transport failure. */
+const serviceCommand = (path: string, id: string) =>
+  fetchJson<ServiceResult>(path, jsonInit('POST', { id })).then((d) => ({ ok: d.ok ?? true, service: d.service }));
+export const startServiceById = (id: string) => serviceCommand('/services/start', id);
+export const stopServiceById = (id: string) => serviceCommand('/services/stop', id);
 
-export async function startServiceById(id: string): Promise<{ ok: boolean; service?: ServiceInfo }> {
-  const res = await fetch(`${BRIDGE_BASE}/services/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return { ok: data.ok ?? true, service: data.service };
-}
+/** Stop / start every bridge-owned extra (conductor, scheduler); IM channels are untouched. */
+export const stopAllExtras = () => postJson('/services/stop-extras').then(() => undefined);
+export const startAllExtras = () => postJson('/services/start-extras').then(() => undefined);
 
-export async function stopServiceById(id: string): Promise<{ ok: boolean; service?: ServiceInfo }> {
-  const res = await fetch(`${BRIDGE_BASE}/services/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return { ok: data.ok ?? true, service: data.service };
-}
-
-export async function fetchServiceLogs(id: string, tail = 200): Promise<string[]> {
-  const res = await fetch(
-    `${BRIDGE_BASE}/services/logs?id=${encodeURIComponent(id)}&tail=${tail}`,
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.lines ?? [];
-}
-
-export async function fetchMykeyContent(): Promise<string> {
-  const res = await fetch(`${BRIDGE_BASE}/services/mykey`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.content ?? '';
-}
-
-export async function saveMykeyContent(content: string): Promise<boolean> {
-  const res = await fetch(`${BRIDGE_BASE}/services/mykey`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.ok ?? false;
-}
-
-export async function exitBridge(): Promise<boolean> {
-  const res = await fetch(`${BRIDGE_BASE}/services/bridge/exit`, {
-    method: 'POST',
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.ok ?? false;
-}
+export const fetchServiceLogs = (id: string, tail = 200) =>
+  getJson<{ lines?: string[] }>(`/services/logs?id=${encodeURIComponent(id)}&tail=${tail}`).then((d) => d.lines ?? []);
+export const fetchMykeyContent = () => getJson<{ content?: string }>('/services/mykey').then((d) => d.content ?? '');
+export const saveMykeyContent = (content: string) => postJson('/services/mykey', { content }).then(() => true);
+export const exitBridge = () => postJson('/services/bridge/exit').then(() => true);

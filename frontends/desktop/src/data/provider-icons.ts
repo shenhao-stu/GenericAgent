@@ -17,6 +17,7 @@ import Cohere from '@lobehub/icons/es/Cohere/components/Mono';
 import XAI from '@lobehub/icons/es/XAI/components/Mono';
 import Baichuan from '@lobehub/icons/es/Baichuan/components/Mono';
 import ByteDance from '@lobehub/icons/es/ByteDance/components/Mono';
+import Ollama from '@lobehub/icons/es/Ollama/components/Mono';
 
 export interface ProviderIconDef {
   key: string;
@@ -46,6 +47,7 @@ export const PROVIDER_ICONS: Record<string, ProviderIconDef> = {
   xai: { key: 'xai', displayName: 'xAI', color: '#000000', Component: XAI },
   baichuan: { key: 'baichuan', displayName: 'Baichuan', color: '#4A90E2', Component: Baichuan },
   bytedance: { key: 'bytedance', displayName: 'ByteDance', color: '#006EFF', Component: ByteDance },
+  ollama: { key: 'ollama', displayName: 'Ollama', color: '#000000', Component: Ollama },
 };
 
 export function getProviderIcon(key: string): ProviderIconDef | undefined {

@@ -32,16 +32,25 @@ function applyToDOM(appearance: string, chatFontSize: number) {
   }
 }
 
-export type SettingsView = 'main' | 'addModel';
+export const SETTINGS_SECTIONS = ['general', 'models', 'data', 'connection', 'help'] as const;
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
+/** A section of the dialog, or the add/edit-model form that lives inside the models section. */
+export type SettingsView = SettingsSection | 'addModel';
+
+export const settingsSectionOf = (view: SettingsView): SettingsSection => (view === 'addModel' ? 'models' : view);
 
 /** A chat can only run on a concrete provider profile; the aggregation group alone is not a model. */
 export function hasUsableModel(profiles: ModelProfile[]): boolean {
   return profiles.some((profile) => profile.kind !== 'mixin');
 }
 
+export function profileIsMixin(profiles: ModelProfile[], no: number | null | undefined): boolean {
+  return no != null && profiles[no]?.kind === 'mixin';
+}
+
 interface SettingsState {
   visible: boolean;
-  /** Which view the settings dialog shows when opened; the dialog resets it to `main` on close. */
+  /** Which view the settings dialog shows when opened; the dialog resets it to `general` on close. */
   view: SettingsView;
   /** False until the first successful profile load, so "no model yet" is never shown while loading. */
   profilesLoaded: boolean;
@@ -77,14 +86,14 @@ function readInitialState() {
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   visible: false,
-  view: 'main',
+  view: 'general',
   profilesLoaded: false,
   modelProfiles: [],
   liveModel: null,
   ...readInitialState(),
 
-  open: (view = 'main') => set({ visible: true, view }),
-  close: () => set({ visible: false, view: 'main' }),
+  open: (view = 'general') => set({ visible: true, view }),
+  close: () => set({ visible: false, view: 'general' }),
   setView: (view) => set({ view }),
 
   setAppearance: (app) => {

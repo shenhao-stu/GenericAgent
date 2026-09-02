@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { Fragment, useCallback, useState } from 'react';
 import { Input, Tooltip } from '@douyinfe/semi-ui';
 import { IconSearchStroked } from '@douyinfe/semi-icons';
 import { Codicon } from '../../lib/icons';
@@ -7,7 +7,7 @@ import { useSettingsStore } from '../../stores/settings';
 import { useChatStore } from '../../stores/chat';
 import { useI18n } from '../../i18n';
 import { shortcutFor } from '../../hooks/useGlobalShortcuts';
-import { filterSessions, sortSessions } from './sessionList';
+import { filterSessions, groupSessions, sortSessions } from './sessionList';
 import { SessionSectionHeader } from './SessionSectionHeader';
 import { SessionRow } from './SessionRow';
 import { BridgeMenuPanel } from './BridgeMenuPanel';
@@ -44,7 +44,11 @@ export function LeftSidebar() {
     setRuntimePanelOpen((open) => !open);
   }, []);
 
-  const filtered = filterSessions(sortSessions(sessions), searchQuery);
+  // A search shows one flat ranked list; the browsing view buckets by activity so long histories stay scannable.
+  const groups = searchQuery
+    ? [{ key: 'search', items: filterSessions(sortSessions(sessions), searchQuery) }]
+    : groupSessions(sessions);
+  const isEmpty = groups.every((group) => group.items.length === 0);
   const newSessionLabel = t('nav.chatShortcut', { shortcut: shortcutFor('n') });
 
   function handleNewSession() {
@@ -111,20 +115,27 @@ export function LeftSidebar() {
       )}
       <div className="ga-session-section">
         {(searchQuery || sessionsOpen) && (
-          filtered.length === 0 ? (
+          isEmpty ? (
             <div className="ga-session-empty">
               <p>{searchQuery ? t('search.noResults') : t('conv.emptyList')}</p>
             </div>
           ) : (
             <div className="ga-session-list">
-              {filtered.map((s) => (
-                <SessionRow
-                  key={s.id}
-                  session={s}
-                  isActive={s.id === activeSessionId}
-                  isWorking={runningSessions.has(s.id)}
-                  onClick={() => handleSelectSession(s.id)}
-                />
+              {groups.map((group) => (
+                <Fragment key={group.key}>
+                  {group.key !== 'search' && (
+                    <div className="ga-session-group-label" role="presentation">{t(`conv.group.${group.key}`)}</div>
+                  )}
+                  {group.items.map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      isActive={s.id === activeSessionId}
+                      isWorking={runningSessions.has(s.id)}
+                      onClick={() => handleSelectSession(s.id)}
+                    />
+                  ))}
+                </Fragment>
               ))}
             </div>
           )

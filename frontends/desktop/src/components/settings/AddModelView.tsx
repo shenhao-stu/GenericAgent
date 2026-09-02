@@ -4,7 +4,7 @@ import { useSettingsStore } from '../../stores/settings';
 import { useI18n } from '../../i18n';
 import * as bridge from '../../services/bridge';
 import type { ModelProfile } from '../../services/bridge';
-import { PROVIDER_PRESETS, type ProviderPreset } from '../../data/model-presets';
+import { presetLabel, presetsForLang, type ProviderPreset } from '../../data/model-presets';
 import { ProviderCard } from './ProviderCard';
 
 interface Props {
@@ -41,7 +41,7 @@ const DEFAULTS: FormState = {
 
 export function AddModelView({ editingId, onDone }: Props) {
   const setModelProfiles = useSettingsStore((s) => s.setModelProfiles);
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
 
   const [step, setStep] = useState<Step>('choose');
   const [route, setRoute] = useState<Route | null>(null);
@@ -97,11 +97,12 @@ export function AddModelView({ editingId, onDone }: Props) {
       ...DEFAULTS,
       model: p.defaultModel,
       apibase: p.apibase,
-      name: p.defaultName,
+      apikey: p.defaultKey ?? '',
+      name: presetLabel(p, lang),
       protocol: p.protocol,
     });
     setStep('form');
-  }, []);
+  }, [lang]);
 
   const handleSelectCustom = useCallback(() => {
     setRoute('custom');
@@ -195,7 +196,7 @@ export function AddModelView({ editingId, onDone }: Props) {
         </div>
 
         <div className="ga-provider-list">
-          {PROVIDER_PRESETS.map((p) => (
+          {presetsForLang(lang).map((p) => (
             <ProviderCard
               key={p.key}
               preset={p}

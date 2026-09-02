@@ -1,5 +1,6 @@
 import { memo, useState, useEffect, useRef } from 'react';
 import { useChatStore } from '../../../stores/chat';
+import { useI18n } from '../../../i18n';
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -8,10 +9,10 @@ function formatElapsed(ms: number): string {
   return `${m}m ${s % 60}s`;
 }
 
+/** Before the first token: the store's turnStartedAt survives session switches, so the timer never restarts at 0. */
 export const ResponseLoadingIndicator = memo(function ResponseLoadingIndicator() {
+  const { t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
-  // 起点优先用 store 的 turnStartedAt(跨会话切换可恢复);切走再切回时组件会重新
-  // mount,若用组件本地 Date.now() 会导致计时从 0 重新开始。仅在 store 无起点时回退本地时间。
   const turnStartedAt = useChatStore((s) => s.turnStartedAt);
   const localStartRef = useRef(Date.now());
   const start = turnStartedAt ?? localStartRef.current;
@@ -23,8 +24,9 @@ export const ResponseLoadingIndicator = memo(function ResponseLoadingIndicator()
   }, [start]);
 
   return (
-    <div data-slot="stream-indicator">
+    <div data-slot="stream-indicator" role="status">
       <span data-slot="dither-square" />
+      <span data-slot="indicator-label">{t('composer.thinking')}</span>
       <span data-slot="indicator-timer">{formatElapsed(elapsed)}</span>
     </div>
   );
@@ -35,6 +37,7 @@ interface StallProps {
 }
 
 export const StreamStallIndicator = memo(function StreamStallIndicator({ contentLength }: StallProps) {
+  const { t } = useI18n();
   const [show, setShow] = useState(false);
   const [stallElapsed, setStallElapsed] = useState(0);
   const lastLengthRef = useRef(contentLength);
@@ -66,8 +69,9 @@ export const StreamStallIndicator = memo(function StreamStallIndicator({ content
   if (!show) return null;
 
   return (
-    <div data-slot="stream-indicator" data-stall>
+    <div data-slot="stream-indicator" data-stall role="status">
       <span data-slot="dither-square" />
+      <span data-slot="indicator-label">{t('stream.stalled')}</span>
       <span data-slot="indicator-timer">+{formatElapsed(stallElapsed)}</span>
     </div>
   );

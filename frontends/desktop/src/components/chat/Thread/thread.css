@@ -689,6 +689,11 @@
   animation: indicator-pulse 1.2s ease-in-out infinite;
 }
 
+[data-slot="indicator-label"] {
+  font-size: var(--conversation-caption-font-size);
+  color: var(--semi-color-text-2);
+}
+
 [data-slot="indicator-timer"] {
   font-variant-numeric: tabular-nums;
   font-size: 0.6875rem;

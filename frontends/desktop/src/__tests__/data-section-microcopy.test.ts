@@ -58,7 +58,7 @@ describe('DataSection user-facing copy', () => {
   it('warns about in-process and external writers without claiming cross-process locking', () => {
     expect(zh['data.maintenanceBlocked']).toContain('运行中的会话');
     expect(zh['data.externalProcessWarning']).toContain('桌面应用无法暂停这些外部进程');
-    expect(en['data.maintenanceBlocked']).toContain('running session');
+    expect(en['data.maintenanceBlocked']).toContain('Running chats');
     expect(en['data.externalProcessWarning']).toContain('cannot pause those external processes');
     expect(en['data.importRestoreHint']).toContain('restore the memory folder');
   });

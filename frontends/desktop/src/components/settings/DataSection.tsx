@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Modal, Toast, Tooltip } from '@douyinfe/semi-ui';
 import { useI18n } from '../../i18n';
 import * as bridge from '../../services/bridge';
@@ -17,6 +17,7 @@ import { useChatStore } from '../../stores/chat';
 import { useServicesStore } from '../../stores/services';
 import { useSettingsStore } from '../../stores/settings';
 import { isTauri } from '../../utils/tauri';
+import { serviceLabelKey } from '../services/serviceMeta';
 import { SettingsSectionTitle } from './SettingsSectionTitle';
 
 const tauriAvailable = isTauri();
@@ -80,10 +81,32 @@ export function DataSection() {
     return runningIds.size;
   });
   const serviceStates = useServicesStore((state) => state.services);
+  const stopAllExtras = useServicesStore((state) => state.stopAllExtras);
+  const startAllExtras = useServicesStore((state) => state.startAllExtras);
+  const [stoppingExtras, setStoppingExtras] = useState(false);
+  // Extras we stopped to open the gate come back after the maintenance run; a manual stop elsewhere is respected.
+  const stoppedForMaintenance = useRef(false);
   const runningManagedServices = serviceStates.filter(
     (service) => service.managed && service.running,
   );
   const maintenanceBlocked = runningSessionCount > 0 || runningManagedServices.length > 0;
+  const serviceNames = runningManagedServices.map((service) => t(serviceLabelKey(service.id))).join(', ');
+
+  const handleStopExtras = useCallback(async () => {
+    setStoppingExtras(true);
+    try {
+      if (await stopAllExtras()) stoppedForMaintenance.current = true;
+      else Toast.error({ content: t('err.channelStop') });
+    } finally {
+      setStoppingExtras(false);
+    }
+  }, [stopAllExtras, t]);
+
+  const restoreExtras = useCallback(() => {
+    if (!stoppedForMaintenance.current) return;
+    stoppedForMaintenance.current = false;
+    void startAllExtras();
+  }, [startAllExtras]);
 
   useEffect(() => {
     if (!tauriAvailable) return;
@@ -99,8 +122,8 @@ export function DataSection() {
 
   const maintenanceMessage = useCallback(() => t('data.maintenanceBlocked', {
     sessions: runningSessionCount,
-    services: runningManagedServices.length,
-  }), [runningManagedServices.length, runningSessionCount, t]);
+    services: serviceNames || runningManagedServices.length,
+  }), [runningManagedServices.length, runningSessionCount, serviceNames, t]);
 
   const showDataError = useCallback((error: unknown, fallbackKey: string) => {
     if (error instanceof DataBackupError && error.code === 'maintenance_conflict') {
@@ -198,10 +221,11 @@ export function DataSection() {
           showDataError(error, 'data.importDataError');
         } finally {
           setImporting(false);
+          restoreExtras();
         }
       },
     });
-  }, [lang, showDataError, t]);
+  }, [lang, restoreExtras, showDataError, t]);
 
   const chooseImportSource = useCallback(async (kind: 'backup' | 'folder') => {
     setSourceModalVisible(false);
@@ -254,10 +278,11 @@ export function DataSection() {
           showDataError(error, 'data.exportDataError');
         } finally {
           setExporting(false);
+          restoreExtras();
         }
       },
     });
-  }, [lang, maintenanceBlocked, maintenanceMessage, showDataError, t]);
+  }, [lang, maintenanceBlocked, maintenanceMessage, restoreExtras, showDataError, t]);
 
   const handleRevealExport = useCallback(async () => {
     if (!exportedPath) return;
@@ -306,7 +331,22 @@ export function DataSection() {
             disabled={importing || exporting || maintenanceBlocked}
           />
           {maintenanceBlocked && (
-            <p className="ga-data-maintenance-note" role="status">{maintenanceMessage()}</p>
+            <p className="ga-data-maintenance-note" role="status">
+              {maintenanceMessage()}
+              {runningManagedServices.length > 0 && (
+                <Button
+                  size="small"
+                  type="warning"
+                  theme="light"
+                  className="ga-data-stop-extras"
+                  loading={stoppingExtras}
+                  onClick={handleStopExtras}
+                  data-testid="data-stop-extras"
+                >
+                  {t('data.stopManagedServices')}
+                </Button>
+              )}
+            </p>
           )}
           <p className="ga-data-maintenance-note">{t('data.externalProcessWarning')}</p>
         </>

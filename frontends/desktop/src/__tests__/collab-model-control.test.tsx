@@ -26,10 +26,15 @@ vi.mock('../stores/conductor', () => ({
   useConductorStore: (selector: (value: typeof state) => unknown) => selector(state),
 }));
 vi.mock('../stores/settings', () => ({
-  useSettingsStore: (selector: (value: { defaultModelNo: number }) => unknown) => selector({ defaultModelNo: 0 }),
+  useSettingsStore: (selector: (value: { defaultModelNo: number; modelProfiles: unknown[] }) => unknown) =>
+    selector({ defaultModelNo: 0, modelProfiles: [] }),
+  profileIsMixin: () => false,
 }));
+vi.mock('../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../components/chat/Composer', () => ({
-  Composer: ({ modelControl }: { modelControl?: React.ReactNode }) => <div>{modelControl}</div>,
+  Composer: ({ modelControl, placeholder, canStop }: { modelControl?: React.ReactNode; placeholder: string; canStop?: boolean }) => (
+    <div data-testid="composer" data-placeholder={placeholder} data-can-stop={String(canStop)}>{modelControl}</div>
+  ),
 }));
 vi.mock('../components/chat/Composer/ModelSelector', () => ({
   ModelSelector: (props: {
@@ -61,5 +66,13 @@ describe('Collab model control', () => {
     expect(selector.getAttribute('data-is-running')).toBe('true');
     fireEvent.click(selector);
     expect(selectModel).toHaveBeenCalledWith(3);
+  });
+
+  it('gives the composer conductor copy and no Stop (the conductor cannot be interrupted)', () => {
+    render(<CollabComposer />);
+
+    const composer = screen.getByTestId('composer');
+    expect(composer.getAttribute('data-placeholder')).toBe('collab.placeholder');
+    expect(composer.getAttribute('data-can-stop')).toBe('false');
   });
 });

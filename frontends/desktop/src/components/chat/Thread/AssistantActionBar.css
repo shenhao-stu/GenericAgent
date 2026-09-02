@@ -46,18 +46,8 @@
   user-select: none;
 }
 
-/* Completion clock: L2 detail, revealed with the rest of the bar (#349). */
-[data-slot="action-bar-time"] {
-  opacity: 0;
-  transition: opacity 120ms ease-out;
-}
-
+/* Completion clock stays visible (#349: "is it stuck?" needs a wall-clock anchor); the date lives in the title. */
 [data-slot="action-bar-time"]::before {
   content: '·';
   margin-right: 0.25rem;
-}
-
-[data-slot="aui_assistant-message-root"]:hover [data-slot="action-bar-time"],
-[data-slot="aui_assistant-message-root"]:focus-within [data-slot="action-bar-time"] {
-  opacity: 1;
 }

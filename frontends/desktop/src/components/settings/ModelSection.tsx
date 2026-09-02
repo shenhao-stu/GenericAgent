@@ -5,6 +5,7 @@ import { useI18n } from '../../i18n';
 import * as bridge from '../../services/bridge';
 import type { ModelProfile } from '../../services/bridge';
 import { getProviderIcon, providerFromModel } from '../../data/provider-icons';
+import { Codicon } from '../../lib/icons';
 import { SettingsSectionTitle } from './SettingsSectionTitle';
 
 function ModelIcon({ model, size = 16 }: { model: string; size?: number }) {
@@ -176,26 +177,9 @@ export function ModelSection({ onAdd, onEdit }: Props) {
                         <ModelIcon model={memberProfile?.model || ''} size={14} />
                         <span className="ga-mixin-member-name" title={title}>{label}</span>
                         <span className="ga-mixin-member-actions">
-                          <button
-                            type="button"
-                            className="ga-icon-btn"
-                            disabled={i === 0}
-                            onClick={() => handleMoveUp(memberName)}
-                            title="↑"
-                          >↑</button>
-                          <button
-                            type="button"
-                            className="ga-icon-btn"
-                            disabled={i === mixin.members!.length - 1}
-                            onClick={() => handleMoveDown(memberName)}
-                            title="↓"
-                          >↓</button>
-                          <button
-                            type="button"
-                            className="ga-icon-btn ga-icon-btn--danger"
-                            onClick={() => memberProfile && handleRemoveFromMixin(memberProfile.id)}
-                            title={t('model.removeFromMixin')}
-                          >×</button>
+                          <IconButton icon="arrow-up" label={t('model.moveUp')} disabled={i === 0} onClick={() => handleMoveUp(memberName)} />
+                          <IconButton icon="arrow-down" label={t('model.moveDown')} disabled={i === mixin.members!.length - 1} onClick={() => handleMoveDown(memberName)} />
+                          <IconButton icon="close" label={t('model.removeFromMixin')} danger onClick={() => memberProfile && handleRemoveFromMixin(memberProfile.id)} />
                         </span>
                       </div>
                     );
@@ -265,6 +249,23 @@ export function ModelSection({ onAdd, onEdit }: Props) {
         + {t('set.addModel')}
       </Button>
     </div>
+  );
+}
+
+function IconButton({ icon, label, onClick, disabled, danger }: {
+  icon: string; label: string; onClick: () => void; disabled?: boolean; danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={`ga-icon-btn${danger ? ' ga-icon-btn--danger' : ''}`}
+      disabled={disabled}
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+    >
+      <Codicon name={icon} size="0.75rem" />
+    </button>
   );
 }
 

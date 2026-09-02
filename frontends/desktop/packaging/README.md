@@ -14,7 +14,7 @@ Package jobs build the renderer from the in-tree source (`frontends/desktop/src/
 
 `frontends/desktop/static/**` remains the independent Desktop v1 and is unchanged by Desktop 2.0 packaging.
 
-The package, bundle, qualification, and provenance version for this release is `0.2.2`.
+The package, bundle, qualification, and provenance version for this release is `0.2.3`.
 
 The Semi Design MIT text is tracked as `public/THIRD_PARTY_NOTICES.txt` (copied to `dist/` by the build). Root
 attributes force it to LF on every platform, and `test:dist` verifies the locked notice SHA-256 in the built tree.

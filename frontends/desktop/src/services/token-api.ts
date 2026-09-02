@@ -1,4 +1,5 @@
-import { BRIDGE_BASE, CONDUCTOR_BASE } from './constants';
+import { CONDUCTOR_BASE } from './constants';
+import { getJson } from './http';
 
 export interface TokenRecord {
   thread: string;
@@ -39,9 +40,7 @@ export interface TokenHistoryResponse {
 }
 
 export async function fetchTokenHistory(): Promise<TokenHistoryResponse> {
-  const res = await fetch(`${BRIDGE_BASE}/token-history`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await getJson('/token-history');
 
   const rawHistory: Array<Record<string, unknown>> = data.history ?? [];
   const history: HistoryEntry[] = rawHistory.map((r) => {
@@ -89,16 +88,6 @@ export async function fetchTokenHistory(): Promise<TokenHistoryResponse> {
   };
 }
 
-export async function fetchConductorTokenStats(): Promise<TokenRecord[]> {
-  const res = await fetch(`${CONDUCTOR_BASE}/token-stats`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.records ?? [];
-}
-
-export async function fetchLiveTokenStats(): Promise<TokenRecord[]> {
-  const res = await fetch(`${BRIDGE_BASE}/token-stats`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return data.records ?? [];
-}
+type Records = { records?: TokenRecord[] };
+export const fetchConductorTokenStats = () => getJson<Records>('/token-stats', CONDUCTOR_BASE).then((d) => d.records ?? []);
+export const fetchLiveTokenStats = () => getJson<Records>('/token-stats').then((d) => d.records ?? []);

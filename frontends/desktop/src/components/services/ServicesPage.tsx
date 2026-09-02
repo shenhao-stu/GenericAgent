@@ -20,11 +20,11 @@ export function ServicesPage() {
   return (
     <div className="ga-services-page">
       <Tabs type="line" activeKey={servicesTab} onChange={setServicesTab}>
-        <TabPane tab={t('nav.channels')} itemKey="channels">
-          <ChannelList />
-        </TabPane>
         <TabPane tab={t('nav.status')} itemKey="status">
           <StatusPanel />
+        </TabPane>
+        <TabPane tab={t('nav.channels')} itemKey="channels">
+          <ChannelList />
         </TabPane>
       </Tabs>
     </div>

@@ -9,7 +9,7 @@ vi.mock('../services/bridge', () => ({
   saveConfig: (...args: unknown[]) => mockSaveConfig(...args),
 }));
 
-import { hasUsableModel, useSettingsStore } from '../stores/settings';
+import { hasUsableModel, settingsSectionOf, useSettingsStore } from '../stores/settings';
 
 const mixin = { id: 0, name: '默认组', model: '', apibase: '', protocol: 'oai' as const, stream: true, kind: 'mixin' as const, members: [] };
 const native = { id: 1, name: 'Model A', model: 'model-a', apibase: 'http://localhost', protocol: 'oai' as const, stream: true };
@@ -20,9 +20,16 @@ describe('settings dialog view + first-run predicate', () => {
     store.open('addModel');
     expect(useSettingsStore.getState()).toMatchObject({ visible: true, view: 'addModel' });
     store.close();
-    expect(useSettingsStore.getState()).toMatchObject({ visible: false, view: 'main' });
+    expect(useSettingsStore.getState()).toMatchObject({ visible: false, view: 'general' });
     store.open();
-    expect(useSettingsStore.getState().view).toBe('main');
+    expect(useSettingsStore.getState().view).toBe('general');
+    store.open('models');
+    expect(useSettingsStore.getState().view).toBe('models');
+  });
+
+  it('the add-model form highlights the models section in the nav', () => {
+    expect(settingsSectionOf('addModel')).toBe('models');
+    expect(settingsSectionOf('data')).toBe('data');
   });
 
   it('only a concrete provider profile counts as a usable model', () => {

@@ -1,23 +1,85 @@
-/* Settings Modal — fixed center, inner scroll */
+/* Settings Modal — fixed center, section nav on the left, one scrolling pane on the right.
+   A fixed height keeps the dialog still while switching sections. */
 
 .ga-settings-dialog .semi-modal-content {
-  padding-left: 24px;
+  padding-left: 0;
   padding-right: 0;
-  max-height: 85vh;
+  height: min(640px, 85vh);
   display: flex;
   flex-direction: column;
 }
 
 .ga-settings-dialog .semi-modal-header {
+  padding-left: 24px;
   padding-right: 24px;
   flex-shrink: 0;
 }
 
 .ga-settings-dialog .semi-modal-body {
-  padding: 8px 24px 8px 0;
-  overflow-y: auto;
+  padding: 0;
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+
+.ga-settings-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.ga-settings-nav {
+  flex: 0 0 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 12px 12px 16px;
+  border-right: 1px solid var(--semi-color-border, #e8e8e8);
+}
+
+.ga-settings-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--semi-color-text-1, #1c1f23);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ga-settings-nav-btn .codicon {
+  color: var(--semi-color-text-2, #646a73);
+}
+
+.ga-settings-nav-btn:hover {
+  background: var(--semi-color-fill-0, #f5f5f5);
+}
+
+.ga-settings-nav-btn.active {
+  background: var(--semi-color-primary-light-default, #e8f3ff);
+  color: var(--semi-color-primary, #3370ff);
+  font-weight: 500;
+}
+
+.ga-settings-nav-btn.active .codicon {
+  color: inherit;
+}
+
+.ga-settings-nav-btn:focus-visible {
+  outline: 2px solid var(--semi-color-primary-light-active, #94bfff);
+  outline-offset: -2px;
+}
+
+.ga-settings-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px 24px 16px;
 }
 
 .ga-set-block {
@@ -340,6 +402,11 @@
   color: var(--semi-color-warning, #d99200);
 }
 
+.ga-data-stop-extras {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 .ga-data-source-actions {
   display: flex;
   justify-content: flex-end;
@@ -567,8 +634,8 @@
 
 /* ── Provider cards ── */
 .ga-provider-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 8px;
 }
@@ -594,6 +661,8 @@
 
 .ga-provider-card-icon {
   flex-shrink: 0;
+  display: inline-flex;
+  color: var(--provider-color);
 }
 
 .ga-provider-card-body {

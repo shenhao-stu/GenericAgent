@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import {
-  applySessionTitle, displayTitle, filterSessions, formatAge, sortSessions,
+  applySessionTitle, displayTitle, filterSessions, formatAge, groupSessions, sortSessions,
 } from '../components/layout/sessionList';
 import { t } from '../i18n/t';
 import type { SessionInfo } from '../services/chat';
@@ -46,6 +46,43 @@ describe('sidebar session list', () => {
     const zh = (key: string) => t('zh', key);
     // The bridge titles from the first prompt but leaves `untitled: true` (= not user-named).
     expect(displayTitle({ title: '请只回复两个字：收到', untitled: true } as SessionInfo, zh)).toBe('请只回复两个字：收到');
+  });
+});
+
+describe('groupSessions', () => {
+  // Local noon so day boundaries are unambiguous in any zone the test runs in.
+  const now = new Date(2026, 8, 2, 12, 0, 0).getTime();
+  const secondsAgo = (s: number) => (now - s * 1000) / 1000;
+  const DAY = 86400;
+
+  it('buckets by local calendar age, pinned first, and drops empty buckets', () => {
+    const groups = groupSessions([
+      session('old', { updatedAt: secondsAgo(30 * DAY) }),
+      session('pinned', { pinned: true, updatedAt: secondsAgo(40 * DAY) }),
+      session('this-morning', { updatedAt: secondsAgo(3 * 3600) }),
+      session('yesterday', { updatedAt: secondsAgo(DAY) }),
+      session('three-days', { createdAt: secondsAgo(3 * DAY) }),
+      session('just-now', { updatedAt: secondsAgo(5) }),
+    ], now);
+    expect(groups.map((g) => [g.key, g.items.map((s) => s.id)])).toEqual([
+      ['pinned', ['pinned']],
+      ['today', ['just-now', 'this-morning']],
+      ['yesterday', ['yesterday']],
+      ['week', ['three-days']],
+      ['older', ['old']],
+    ]);
+  });
+
+  it('treats a session without any timestamp as older and never yields a bare label', () => {
+    expect(groupSessions([session('stampless')], now)).toEqual([{ key: 'older', items: [session('stampless')] }]);
+    expect(groupSessions([], now)).toEqual([]);
+  });
+
+  it('has a localized label for every bucket it can produce', () => {
+    for (const key of ['pinned', 'today', 'yesterday', 'week', 'older']) {
+      expect(t('zh', `conv.group.${key}`)).not.toBe(`conv.group.${key}`);
+      expect(t('en', `conv.group.${key}`)).not.toBe(`conv.group.${key}`);
+    }
   });
 });
 

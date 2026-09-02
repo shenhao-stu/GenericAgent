@@ -254,7 +254,7 @@ export function ModelSelector({
 
   const handleOpenSettings = useCallback(() => {
     setOpen(false);
-    useSettingsStore.getState().open();
+    useSettingsStore.getState().open('models');
   }, []);
 
   return (

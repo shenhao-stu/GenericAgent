@@ -10,7 +10,8 @@
 #      points into this bundle.
 #   3. Detach only settings paths owned by this bundle; keep preferences and any
 #      second bundle / external source selection.
-#   4. Remove the WebKitGTK data dir (~/.local/share + ~/.cache for the app id).
+#   4. Remove the WebKitGTK data dirs (~/.local/share + ~/.cache) and the window-state
+#      config dir (~/.config) for the app id.
 #   5. Delete the bundle folder.
 set -u
 
@@ -25,7 +26,7 @@ echo "This will completely remove GenericAgent from this computer:"
 echo "  - stop its background services (bridge 14168 / conductor 8900)"
 echo "  - delete the desktop shortcut"
 echo "  - detach this bundle from shared desktop settings (preferences are kept)"
-echo "  - delete WebView data (~/.local/share/$APP_ID, ~/.cache/$APP_ID)"
+echo "  - delete WebView data and window state (~/.local/share, ~/.cache, ~/.config for $APP_ID)"
 echo "  - delete THIS folder and everything in it:"
 echo "      $BUNDLE"
 echo
@@ -96,8 +97,9 @@ else
   echo "     no owned settings paths could be detached"
 fi
 
-echo "==> Removing WebView data"
-for d in "$HOME/.local/share/$APP_ID" "$HOME/.cache/$APP_ID"; do
+echo "==> Removing WebView data and window state"
+# ~/.config/<app id> holds the remembered window geometry (tauri-plugin-window-state).
+for d in "$HOME/.local/share/$APP_ID" "$HOME/.cache/$APP_ID" "${XDG_CONFIG_HOME:-$HOME/.config}/$APP_ID"; do
   if [ -d "$d" ]; then rm -rf "$d" && echo "[OK] removed $d"; fi
 done
 

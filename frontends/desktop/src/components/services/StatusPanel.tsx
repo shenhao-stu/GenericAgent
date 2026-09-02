@@ -9,30 +9,7 @@ import { showError, showSuccess } from '../../utils/toast';
 import { isTauri, invokeStartBridge } from '../../utils/tauri';
 import { isChannelService } from './ChannelList';
 import { ChannelLogModal } from './ChannelLogModal';
-
-interface ServiceMeta {
-  labelKey: string;
-  summaryKey: string;
-  tipKey: string;
-}
-
-const SERVICE_META: Record<string, ServiceMeta> = {
-  '__bridge__': {
-    labelKey: 'proc.bridge',
-    summaryKey: 'proc.bridgeSummary',
-    tipKey: 'proc.bridgeTip',
-  },
-  'frontends/conductor.py': {
-    labelKey: 'proc.conductor',
-    summaryKey: 'proc.conductorSummary',
-    tipKey: 'proc.conductorTip',
-  },
-  'reflect/scheduler.py': {
-    labelKey: 'proc.scheduler',
-    summaryKey: 'proc.schedulerSummary',
-    tipKey: 'proc.schedulerTip',
-  },
-};
+import { SERVICE_META } from './serviceMeta';
 
 export function StatusPanel() {
   const { t } = useI18n();

@@ -54,12 +54,80 @@ fn window_state_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
-/// Apply the remembered geometry once the window frame is final (decorations settled).
+/// Apply the remembered geometry once the window frame is final (decorations settled), then make sure
+/// the result is actually reachable on the monitors present now.
 fn restore_window_state<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use tauri_plugin_window_state::WindowExt;
     if let Err(err) = window.restore_state(WINDOW_STATE_FLAGS) {
         eprintln!("[window-state] restore failed: {err}");
     }
+    clamp_window_to_monitor(window);
+}
+
+/// Axis-aligned rectangle in physical pixels: `(x, y, width, height)`.
+type Rect = (i32, i32, u32, u32);
+
+/// Fit `window` inside `work_area`: shrink to the area when larger, then slide so every edge is visible.
+/// The plugin only validates that a saved *position* still hits a monitor; a size saved on a bigger
+/// display (or a stale state) otherwise comes back with its bottom/right edges — and the resize grips —
+/// off-screen.
+fn fit_rect_into(window: Rect, work_area: Rect) -> Rect {
+    let (ax, ay, aw, ah) = work_area;
+    let width = window.2.min(aw);
+    let height = window.3.min(ah);
+    let x = window.0.clamp(ax, ax + (aw - width) as i32);
+    let y = window.1.clamp(ay, ay + (ah - height) as i32);
+    (x, y, width, height)
+}
+
+/// The renderer's language preference (`ui.lang` in the shared settings file); `zh` unless the user chose English.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ui_language_from(settings: &serde_json::Map<String, serde_json::Value>) -> String {
+    settings
+        .get("ui")
+        .and_then(|ui| ui.get("lang"))
+        .and_then(|lang| lang.as_str())
+        .filter(|lang| *lang == "en")
+        .unwrap_or("zh")
+        .to_string()
+}
+
+/// Tray menu copy is native (no renderer dictionary in reach), so it follows the same preference here.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tray_labels(lang: &str) -> (&'static str, &'static str) {
+    match lang {
+        "en" => ("Show window", "Quit"),
+        _ => ("显示主窗口", "退出"),
+    }
+}
+
+fn clamp_window_to_monitor<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
+    let (Ok(Some(monitor)), Ok(position), Ok(size)) = (
+        window.current_monitor(),
+        window.outer_position(),
+        window.outer_size(),
+    ) else {
+        return;
+    };
+    let area = monitor.work_area();
+    let current = (position.x, position.y, size.width, size.height);
+    let fitted = fit_rect_into(
+        current,
+        (
+            area.position.x,
+            area.position.y,
+            area.size.width,
+            area.size.height,
+        ),
+    );
+    if fitted == current {
+        return;
+    }
+    let _ = window.set_size(tauri::PhysicalSize::new(fitted.2, fitted.3));
+    let _ = window.set_position(tauri::PhysicalPosition::new(fitted.0, fitted.1));
 }
 
 /// The plugin only writes on `RunEvent::Exit`; on Windows the X button hides to tray and a later
@@ -2965,8 +3033,9 @@ pub fn run() {
             // Windows: system tray so the app can hide-on-close instead of exiting.
             #[cfg(windows)]
             {
-                let show_item = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
-                let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+                let (show_label, quit_label) = tray_labels(&ui_language_from(&read_settings()));
+                let show_item = MenuItemBuilder::with_id("show", show_label).build(app)?;
+                let quit_item = MenuItemBuilder::with_id("quit", quit_label).build(app)?;
                 let menu = MenuBuilder::new(app)
                     .item(&show_item)
                     .separator()
@@ -3074,6 +3143,43 @@ mod tests {
             .get_envs()
             .find(|entry| entry.0 == std::ffi::OsStr::new(key))
             .map(|entry| entry.1.map(|value| value.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn restored_window_is_fitted_into_the_monitor_work_area() {
+        let area = (0, 0, 2880, 1760);
+        // Fits already: untouched.
+        assert_eq!(
+            fit_rect_into((100, 50, 2560, 1600), area),
+            (100, 50, 2560, 1600)
+        );
+        // Oversized state from a bigger monitor: shrunk to the area and pinned to its origin.
+        assert_eq!(
+            fit_rect_into((600, 300, 3174, 1987), area),
+            (0, 0, 2880, 1760)
+        );
+        // Fits but hangs off the bottom/right: slid back so every edge is visible.
+        assert_eq!(
+            fit_rect_into((1000, 900, 2000, 1000), area),
+            (880, 760, 2000, 1000)
+        );
+        // Negative origin on a secondary monitor above the primary is honoured.
+        assert_eq!(
+            fit_rect_into((-50, -1100, 1920, 1000), (1, -1080, 1920, 1040)),
+            (1, -1080, 1920, 1000)
+        );
+    }
+
+    #[test]
+    fn tray_labels_follow_the_saved_ui_language() {
+        let en = serde_json::json!({"ui": {"lang": "en"}});
+        let zh = serde_json::json!({"ui": {"lang": "zh"}});
+        let none = serde_json::json!({});
+        assert_eq!(ui_language_from(en.as_object().unwrap()), "en");
+        assert_eq!(ui_language_from(zh.as_object().unwrap()), "zh");
+        assert_eq!(ui_language_from(none.as_object().unwrap()), "zh");
+        assert_eq!(tray_labels("en"), ("Show window", "Quit"));
+        assert_eq!(tray_labels("zh"), ("显示主窗口", "退出"));
     }
 
     #[test]

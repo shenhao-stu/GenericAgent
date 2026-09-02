@@ -15,10 +15,6 @@ vi.mock('../services/chat', () => ({
   statDroppedPath: statDroppedPathMock,
 }));
 
-vi.mock('../components/chat/Composer/usePlaceholder', () => ({
-  usePlaceholder: () => ({ text: 'Type a message' }),
-}));
-
 vi.mock('../components/chat/Composer/CompletionDrawer', () => ({
   CompletionDrawer: () => null,
 }));
@@ -45,18 +41,9 @@ vi.mock('../components/chat/Composer/StatusStack', () => ({
   StatusStack: () => null,
 }));
 
-vi.mock('../stores/settings', () => {
-  const useSettingsStore = (selector: (state: { lang: 'en' | 'zh' }) => unknown) => selector({ lang: 'en' });
-  useSettingsStore.getState = () => ({ modelProfiles: [], defaultModelNo: 0, liveModel: null });
-  return { useSettingsStore };
-});
-
-vi.mock('../stores/chat', () => {
-  const useChatStore = (selector: (state: { sessionModelNo: number | null }) => unknown) => selector({ sessionModelNo: null });
-  useChatStore.getState = () => ({ sessionModelNo: null });
-  return { useChatStore };
-});
-vi.mock('../components/chat/Composer/WorkDirPill', () => ({ WorkDirPill: () => null }));
+vi.mock('../stores/settings', () => ({
+  useSettingsStore: (selector: (state: { lang: 'en' | 'zh' }) => unknown) => selector({ lang: 'en' }),
+}));
 
 vi.mock('../components/chat/Composer/RichEditorInput', () => {
   const RichEditorInput = forwardRef(function MockRichEditorInput(
@@ -228,7 +215,7 @@ describe('Composer attachment lifecycle', () => {
 
   it('turns a dropped image into a ready thumbnail', async () => {
     globalThis.FileReader = SuccessFileReader as unknown as typeof FileReader;
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const image = new File(['png'], 'diagram.png', { type: 'image/png' });
 
     fireEvent.drop(composerRoot(container), { dataTransfer: fileTransfer([image]) });
@@ -241,7 +228,7 @@ describe('Composer attachment lifecycle', () => {
   it('uploads a dropped ordinary file exactly once and renders a ready chip', async () => {
     globalThis.FileReader = SuccessFileReader as unknown as typeof FileReader;
     uploadFileMock.mockResolvedValue('/bridge/draft.txt');
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const file = new File(['hello'], 'draft.txt', { type: 'text/plain' });
 
     fireEvent.drop(composerRoot(container), { dataTransfer: fileTransfer([file]) });
@@ -257,7 +244,7 @@ describe('Composer attachment lifecycle', () => {
   it('keeps mixed dropped files in source order without duplicates', async () => {
     globalThis.FileReader = SuccessFileReader as unknown as typeof FileReader;
     uploadFileMock.mockImplementation(async (name: string) => `/bridge/${name}`);
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const files = [
       new File(['png'], 'first.png', { type: 'image/png' }),
       new File(['pdf'], 'second.pdf', { type: 'application/pdf' }),
@@ -277,7 +264,7 @@ describe('Composer attachment lifecycle', () => {
   });
 
   it('does not show an overlay or prevent default for text and URL drags', () => {
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const root = composerRoot(container);
     const transfer = textTransfer();
 
@@ -289,7 +276,7 @@ describe('Composer attachment lifecycle', () => {
   });
 
   it('keeps the file overlay visible while crossing composer children', () => {
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const root = composerRoot(container);
     const child = screen.getByRole('button', { name: 'Attach' });
     const transfer = fileTransfer([new File(['hello'], 'draft.txt', { type: 'text/plain' })]);
@@ -312,7 +299,7 @@ describe('Composer attachment lifecycle', () => {
   it('disables the CTA while a non-image file is still uploading', async () => {
     globalThis.FileReader = IdleFileReader as unknown as typeof FileReader;
 
-    render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
 
     const fileInput = document.querySelector('input[type="file"]:not([accept])') as HTMLInputElement;
     const file = new File(['hello'], 'draft.txt', { type: 'text/plain' });
@@ -331,7 +318,7 @@ describe('Composer attachment lifecycle', () => {
     globalThis.FileReader = SuccessFileReader as unknown as typeof FileReader;
     uploadFileMock.mockRejectedValueOnce(new Error('upload failed')).mockResolvedValueOnce('/bridge/broken.txt');
 
-    render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
 
     const fileInput = document.querySelector('input[type="file"]:not([accept])') as HTMLInputElement;
     const file = new File(['hello'], 'broken.txt', { type: 'text/plain' });
@@ -350,7 +337,7 @@ describe('Composer attachment lifecycle', () => {
 
   it('removes an uploading attachment without letting a late read revive or upload it', async () => {
     globalThis.FileReader = DeferredFileReader as unknown as typeof FileReader;
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const file = new File(['hello'], 'remove-me.txt', { type: 'text/plain' });
 
     fireEvent.drop(composerRoot(container), { dataTransfer: fileTransfer([file]) });
@@ -366,7 +353,7 @@ describe('Composer attachment lifecycle', () => {
 
   it('shows explicit errors for folders, empty files, and oversized files', async () => {
     globalThis.FileReader = SuccessFileReader as unknown as typeof FileReader;
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const folder = new File(['folder'], 'examples', { type: '' });
     const empty = new File([], 'empty.txt', { type: 'text/plain' });
     const oversized = new File(['large'], 'large.zip', { type: 'application/zip' });
@@ -387,7 +374,7 @@ describe('Composer attachment lifecycle', () => {
 
   it('shows an explicit retryable error when FileReader cannot read a file', async () => {
     globalThis.FileReader = FailureFileReader as unknown as typeof FileReader;
-    const { container } = render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} />);
     const file = new File(['hello'], 'unreadable.txt', { type: 'text/plain' });
 
     fireEvent.drop(composerRoot(container), { dataTransfer: fileTransfer([file]) });
@@ -401,7 +388,7 @@ describe('Composer attachment lifecycle', () => {
     globalThis.FileReader = SuccessFileReader as unknown as typeof FileReader;
     uploadFileMock.mockResolvedValue('/bridge/report.pdf');
     const onSend = vi.fn();
-    const { container } = render(<Composer onSend={onSend} onStop={vi.fn()} isGenerating={false} />);
+    const { container } = render(<Composer placeholder="Type a message" onSend={onSend} onStop={vi.fn()} isGenerating={false} />);
     const image = new File(['png'], 'photo.png', { type: 'image/png' });
     const file = new File(['pdf'], 'report.pdf', { type: 'application/pdf' });
 
@@ -422,7 +409,7 @@ describe('Composer attachment lifecycle', () => {
   it('restores drafts and attachments when switching between sessions', async () => {
     globalThis.FileReader = IdleFileReader as unknown as typeof FileReader;
     const props = { onSend: vi.fn(), onStop: vi.fn(), isGenerating: false };
-    const { rerender } = render(<Composer {...props} sessionId="A" />);
+    const { rerender } = render(<Composer placeholder="Type a message" {...props} sessionId="A" />);
 
     fireEvent.change(screen.getByLabelText('Composer input'), { target: { value: 'draft A' } });
     const fileInput = document.querySelector('input[type="file"]:not([accept])') as HTMLInputElement;
@@ -431,12 +418,12 @@ describe('Composer attachment lifecycle', () => {
     });
     await waitFor(() => expect(screen.getByText('a.txt')).not.toBeNull());
 
-    rerender(<Composer {...props} sessionId="B" />);
+    rerender(<Composer placeholder="Type a message" {...props} sessionId="B" />);
     expect((screen.getByLabelText('Composer input') as HTMLTextAreaElement).value).toBe('');
     expect(screen.queryByText('a.txt')).toBeNull();
     fireEvent.change(screen.getByLabelText('Composer input'), { target: { value: 'draft B' } });
 
-    rerender(<Composer {...props} sessionId="A" />);
+    rerender(<Composer placeholder="Type a message" {...props} sessionId="A" />);
     expect((screen.getByLabelText('Composer input') as HTMLTextAreaElement).value).toBe('draft A');
     expect(screen.getByText('a.txt')).not.toBeNull();
   });
@@ -445,12 +432,12 @@ describe('Composer attachment lifecycle', () => {
     globalThis.FileReader = DeferredFileReader as unknown as typeof FileReader;
     uploadFileMock.mockResolvedValue('/bridge/a.txt');
     const props = { onSend: vi.fn(), onStop: vi.fn(), isGenerating: false };
-    const { container, rerender } = render(<Composer {...props} sessionId="A" />);
+    const { container, rerender } = render(<Composer placeholder="Type a message" {...props} sessionId="A" />);
     const file = new File(['hello'], 'a.txt', { type: 'text/plain' });
 
     fireEvent.drop(composerRoot(container), { dataTransfer: fileTransfer([file]) });
     await screen.findByText('a.txt');
-    rerender(<Composer {...props} sessionId="B" />);
+    rerender(<Composer placeholder="Type a message" {...props} sessionId="B" />);
     expect(screen.queryByText('a.txt')).toBeNull();
 
     DeferredFileReader.instances[0].resolve();
@@ -462,7 +449,7 @@ describe('Composer attachment lifecycle', () => {
     });
     expect(useThreadViewStore.getState().viewBySessionId.B?.attachments ?? []).toEqual([]);
 
-    rerender(<Composer {...props} sessionId="A" />);
+    rerender(<Composer placeholder="Type a message" {...props} sessionId="A" />);
     expect(screen.getByText('a.txt')).not.toBeNull();
     expect(container.querySelector('[data-slot="attachment-file-chip"]')?.getAttribute('data-status')).toBe('ready');
   });
@@ -471,7 +458,7 @@ describe('Composer attachment lifecycle', () => {
     statDroppedPathMock.mockResolvedValueOnce({ isDir: true, size: 0, name: 'project' });
     const fake = installFakeTauriDrop();
 
-    render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} sessionId="A" />);
+    render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} sessionId="A" />);
     fake.fire('drop', ['C:\\Users\\me\\project']);
 
     await waitFor(() => expect(screen.getByText('project')).not.toBeNull());
@@ -488,7 +475,7 @@ describe('Composer attachment lifecycle', () => {
     });
     const fake = installFakeTauriDrop();
 
-    render(<Composer onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} sessionId="A" />);
+    render(<Composer placeholder="Type a message" onSend={vi.fn()} onStop={vi.fn()} isGenerating={false} sessionId="A" />);
     fake.fire('drop', ['/home/me/shot.png']);
 
     const image = await screen.findByAltText('shot.png') as HTMLImageElement;

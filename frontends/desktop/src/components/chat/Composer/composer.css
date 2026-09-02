@@ -329,7 +329,8 @@
   opacity: 0.8;
 }
 
-[data-slot="composer-cta"][data-state="stop"] {
+[data-slot="composer-cta"][data-state="stop"],
+[data-slot="composer-cta"][data-state="busy"] {
   background: var(--semi-color-bg-0, #fff);
   color: var(--semi-color-text-0, #1c1f23);
   border: 1px solid var(--semi-color-border, #e0e0e0);
@@ -338,6 +339,16 @@
 [data-slot="composer-cta"][data-state="stop"]:hover {
   background: var(--semi-color-fill-0, #f5f5f5);
   opacity: 1;
+}
+
+/* Busy: the turn runs but cannot be interrupted; pulse instead of pretending to be a Stop button. */
+[data-slot="composer-cta"][data-state="busy"]:disabled {
+  opacity: 0.55;
+  animation: composer-cta-busy 1.6s ease-in-out infinite;
+}
+
+@keyframes composer-cta-busy {
+  50% { opacity: 0.25; }
 }
 
 [data-slot="composer-cta"][data-state="queue"] {
